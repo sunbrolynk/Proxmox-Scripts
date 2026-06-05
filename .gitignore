@@ -1,0 +1,22 @@
+# OS generated
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# Secrets — never commit these
+*.key
+*.pem
+*.env
+*.secret
+
+# Temp files
+*.tmp
+*.log
