@@ -28,6 +28,9 @@ CROSS="${RD}✗${CL}"
 INFO="${BL}ℹ${CL}"
 TAB="  "
 
+# Trap CTRL+C
+trap 'echo -e "\n\n${TAB}${YW}⚠  Cancelled by user. Container was NOT destroyed.${CL}\n"; exit 0' SIGINT SIGTERM
+
 msg_ok()    { echo -e "${TAB}${CM} ${GN}$1${CL}"; }
 msg_error() { echo -e "${TAB}${CROSS} ${RD}$1${CL}"; }
 msg_warn()  { echo -e "${TAB}${INFO} ${YW}$1${CL}"; }
