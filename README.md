@@ -31,7 +31,7 @@ Interactive update script for [Traefik](https://traefik.io/) reverse proxy and [
 - Updates to latest or a specific version
 - Automatic backup of current binary before updating
 - Automatic rollback if the new version fails to start
-- Updates Traefik Manager from its git repository
+- Updates Traefik Manager via git pull and runs `setup-assets.sh` for vendor/CSS rebuild
 - Environment checks (OS version, Python version, disk space, memory, architecture)
 - Preflight dependency checks with interactive install of missing packages
 - Detects and offers to start stopped services
@@ -55,6 +55,7 @@ sudo update-traefik v3.7.0           # Update Traefik to a specific version
 sudo update-traefik --traefik-only   # Update Traefik binary only, skip Manager
 sudo update-traefik --manager-only   # Update Traefik Manager only, skip binary
 sudo update-traefik -h               # Show help
+sudo update-traefik -V               # Show version
 ```
 
 **Configuration:**
@@ -68,6 +69,7 @@ TRAEFIK_MANAGER_DIR="/opt/traefik-manager"  # Traefik Manager install directory
 TRAEFIK_MANAGER_USER="traefik-manager"      # Linux user running Traefik Manager
 TRAEFIK_MANAGER_SERVICE="traefik-manager"   # Traefik Manager systemd service name
 TRAEFIK_MANAGER_PORT="5000"                 # Traefik Manager web UI port
+TRAEFIK_MANAGER_REPO="chr0nzz/traefik-manager"  # Traefik Manager GitHub repo
 TRAEFIK_DASHBOARD_PORT="8080"               # Traefik dashboard port
 TRAEFIK_ARCH="linux_amd64"                  # Binary architecture
 MIN_DISK_MB=500                             # Minimum disk space warning threshold
@@ -126,6 +128,60 @@ MIN_PYTHON="3.9"                            # Minimum Python version for Manager
 
 ---
 
+### pct-force-destroy
+
+Force destroy a Proxmox LXC container that's stuck due to stale locks. This commonly happens when NFS-backed storage timeouts leave orphaned lock files that prevent container deletion.
+
+**The Problem:** Deleting an LXC on shared NFS storage sometimes hangs forever on "trying to acquire cfs lock 'storage-...'". The only fix is usually a node reboot — this script eliminates that.
+
+**Features:**
+- Validates container exists and is stopped before doing anything
+- Clears stale PVE config locks (`/run/lock/lxc/`)
+- Clears stale CFS storage locks (`/etc/pve/priv/lock/`)
+- Color-coded output showing each step
+- Clear error messages with suggested fixes if something fails
+- Root check and input validation
+
+**Install:**
+
+```bash
+wget -O /usr/local/bin/pct-force-destroy https://raw.githubusercontent.com/SunBroLynk/Proxmox-Scripts/main/pct-force-destroy.sh
+chmod +x /usr/local/bin/pct-force-destroy
+```
+
+For clusters, deploy to all nodes:
+
+```bash
+for node in node1-ip node2-ip node3-ip; do
+    scp /usr/local/bin/pct-force-destroy root@${node}:/usr/local/bin/
+done
+```
+
+**Usage:**
+
+```bash
+sudo pct-force-destroy 105           # Force destroy container 105
+sudo pct-force-destroy -h            # Show help
+```
+
+**What it does:**
+1. Verifies the container exists and is stopped
+2. Clears stale PVE config locks
+3. Clears stale CFS storage locks
+4. Runs `pct destroy` with `--purge --force`
+
+**Preventing the root cause:**
+
+If you frequently hit stale NFS locks, change your NFS mount options from `hard` to `soft` with a timeout. In Proxmox, edit `/etc/pve/storage.cfg` and add:
+
+```
+options soft,timeo=30,retrans=3
+```
+
+This makes NFS operations timeout cleanly instead of hanging forever. See [Proxmox NFS documentation](https://pve.proxmox.com/wiki/Storage:_NFS) for details.
+
+---
+
 ## Contributing
 
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
@@ -140,6 +196,10 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 ## License
 
 This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+
+## Disclaimer
+
+These scripts are provided as-is with no warranty. Always test in a non-production environment first. Take snapshots before running update scripts. The authors are not responsible for any damage or data loss resulting from the use of these scripts.
 
 ## Disclaimer
 
