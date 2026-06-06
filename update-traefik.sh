@@ -60,6 +60,13 @@ cleanup() {
 header_info() {
     clear
     cat <<"EOF"
+  ___                              
+ | _ \_ _ _____ ___ __  _____ __  
+ |  _/ '_/ _ \ \ / '  \/ _ \ \ / 
+ |_| |_| \___/_\_\_|_|_\___/_\_\  
+      ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+          S c r i p t s
+
    ______                _____ __
   /_  __/________ ____  / __(_) /__
    / / / ___/ __ `/ _ \/ /_/ / //_/
@@ -639,6 +646,15 @@ update_manager() {
     msg_info "Updating Python dependencies"
     sudo -u "${TRAEFIK_MANAGER_USER}" "${TRAEFIK_MANAGER_DIR}/venv/bin/pip" install -r requirements.txt gunicorn --quiet 2>/dev/null
     msg_ok "Python dependencies updated"
+
+    # Rebuild vendor assets and Tailwind CSS
+    if [[ -f "${TRAEFIK_MANAGER_DIR}/scripts/setup-assets.sh" ]]; then
+        msg_info "Rebuilding assets (vendor + Tailwind CSS)"
+        bash "${TRAEFIK_MANAGER_DIR}/scripts/setup-assets.sh" > /dev/null 2>&1
+        msg_ok "Assets rebuilt"
+    else
+        msg_warn "setup-assets.sh not found — vendor assets may be outdated"
+    fi
 
     # Restart
     msg_info "Restarting ${TRAEFIK_MANAGER_SERVICE} service"
