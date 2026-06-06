@@ -1,3 +1,5 @@
+<div align="center">
+
 ```
   ___                              
  | _ \_ _ _____ ___ __  _____ __  
@@ -6,6 +8,8 @@
       ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
           S c r i p t s
 ```
+
+</div>
 
 A collection of utility scripts for managing services running on Proxmox VE — VMs, LXCs, and the applications inside them.
 
@@ -29,7 +33,10 @@ Styled after the [Proxmox VE Community Scripts](https://github.com/community-scr
 
 ## Scripts
 
-### update-traefik
+<details>
+<summary><strong>update-traefik</strong> — Update Traefik reverse proxy and Traefik Manager</summary>
+
+<br>
 
 Interactive update script for [Traefik](https://traefik.io/) reverse proxy and [Traefik Manager](https://github.com/chr0nzz/traefik-manager) web UI.
 
@@ -90,7 +97,8 @@ MIN_PYTHON="3.9"                            # Minimum Python version for Manager
 - Traefik installed as a systemd service
 - Traefik Manager (optional) installed via git clone with a Python virtualenv
 
-**How it works:**
+<details>
+<summary><strong>How it works</strong> (flow diagram)</summary>
 
 ```
 ┌─────────────────────────────────┐
@@ -133,9 +141,16 @@ MIN_PYTHON="3.9"                            # Minimum Python version for Manager
 └─────────────────────────────────┘
 ```
 
+</details>
+
+</details>
+
 ---
 
-### pct-force-destroy
+<details>
+<summary><strong>pct-force-destroy</strong> — Force destroy LXCs with stale NFS locks</summary>
+
+<br>
 
 Force destroy a Proxmox LXC container that's stuck due to stale locks. This commonly happens when NFS-backed storage timeouts leave orphaned lock files that prevent container deletion.
 
@@ -186,6 +201,8 @@ options soft,timeo=30,retrans=3
 ```
 
 This makes NFS operations timeout cleanly instead of hanging forever. See [Proxmox NFS documentation](https://pve.proxmox.com/wiki/Storage:_NFS) for details.
+
+</details>
 
 ---
 
