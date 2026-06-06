@@ -34,8 +34,27 @@ msg_warn()  { echo -e "${TAB}${INFO} ${YW}$1${CL}"; }
 msg_info()  { echo -ne "${TAB}- ${YW}$1...${CL}"; }
 msg_done()  { echo -e "${BFR}${TAB}${CM} ${GN}$1${CL}"; }
 
-show_help() {
+header_info() {
+    clear
+    cat <<"EOF"
+  ___                              
+ | _ \_ _ _____ ___ __  _____ __  
+ |  _/ '_/ _ \ \ / '  \/ _ \ \ / 
+ |_| |_| \___/_\_\_|_|_\___/_\_\  
+      ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+          S c r i p t s
+
+   __              __   
+  / /  ___  ____  / /__ 
+ / /__/ _ \/ __/ /  '_/ 
+/____/\___/\__/ /_/\_\  
+   b r e a k e r
+EOF
     echo ""
+}
+
+show_help() {
+    header_info
     echo -e "${BD}NAME${CL}"
     echo -e "${TAB}${SCRIPT_NAME} — force destroy a Proxmox LXC with stale locks"
     echo ""
@@ -131,7 +150,7 @@ if ! [[ "$CTID" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-echo ""
+header_info
 echo -e "${TAB}${BD}Force Destroy CT ${CTID}${CL}"
 echo ""
 
