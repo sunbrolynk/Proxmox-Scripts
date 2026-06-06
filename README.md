@@ -1,4 +1,11 @@
-# Proxmox-Scripts
+```
+  ___                              
+ | _ \_ _ _____ ___ __  _____ __  
+ |  _/ '_/ _ \ \ / '  \/ _ \ \ / 
+ |_| |_| \___/_\_\_|_|_\___/_\_\  
+      ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+          S c r i p t s
+```
 
 A collection of utility scripts for managing services running on Proxmox VE — VMs, LXCs, and the applications inside them.
 
@@ -196,10 +203,6 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 ## License
 
 This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
-
-## Disclaimer
-
-These scripts are provided as-is with no warranty. Always test in a non-production environment first. Take snapshots before running update scripts. The authors are not responsible for any damage or data loss resulting from the use of these scripts.
 
 ## Disclaimer
 
