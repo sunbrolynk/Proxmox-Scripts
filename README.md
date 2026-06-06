@@ -1,14 +1,12 @@
 <div align="center">
-
-```
+<pre>
   ___                              
  | _ \_ _ _____ ___ __  _____ __  
  |  _/ '_/ _ \ \ / '  \/ _ \ \ / 
  |_| |_| \___/_\_\_|_|_\___/_\_\  
       ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
           S c r i p t s
-```
-
+</pre>
 </div>
 
 A collection of utility scripts for managing services running on Proxmox VE — VMs, LXCs, and the applications inside them.
