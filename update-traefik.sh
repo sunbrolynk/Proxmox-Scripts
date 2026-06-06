@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Traefik & Traefik Manager Update Script
-# https://github.com/SunBroLynk/proxmox-scripts
+# https://github.com/SunBroLynk/Proxmox-Scripts
 # License: MIT
 # Styled after Proxmox VE Community Scripts
 
@@ -14,6 +14,7 @@ TRAEFIK_MANAGER_DIR="/opt/traefik-manager"
 TRAEFIK_MANAGER_USER="traefik-manager"
 TRAEFIK_MANAGER_SERVICE="traefik-manager"
 TRAEFIK_MANAGER_PORT="5000"
+TRAEFIK_MANAGER_REPO="chr0nzz/traefik-manager"
 TRAEFIK_DASHBOARD_PORT="8080"
 TRAEFIK_ARCH="linux_amd64"
 MIN_DISK_MB=500
@@ -24,13 +25,20 @@ MIN_PYTHON="3.9"
 set -euo pipefail
 shopt -s inherit_errexit nullglob
 
+# Script metadata
+SCRIPT_NAME="update-traefik"
+SCRIPT_VERSION="1.1.0"
+SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
+SCRIPT_PATH="$(readlink -f "$0")"
+
 # Colors
-RD=$(echo "\033[01;31m")
-YW=$(echo "\033[33m")
-GN=$(echo "\033[1;92m")
-BL=$(echo "\033[36m")
-CL=$(echo "\033[m")
-BFR="\\r\\033[K"
+RD=$'\033[01;31m'
+YW=$'\033[33m'
+GN=$'\033[1;92m'
+BL=$'\033[36m'
+BD=$'\033[1m'
+CL=$'\033[m'
+BFR=$'\r\033[K'
 HOLD="-"
 CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
@@ -60,6 +68,102 @@ header_info() {
      & Traefik Manager Updater
 EOF
     echo ""
+}
+
+show_help() {
+    header_info
+    cat <<HELP
+${BD}NAME${CL}
+${TAB}${SCRIPT_NAME} — update Traefik reverse proxy and Traefik Manager
+
+${BD}SYNOPSIS${CL}
+${TAB}${SCRIPT_NAME} [${BL}OPTIONS${CL}] [${BL}VERSION${CL}]
+
+${BD}DESCRIPTION${CL}
+${TAB}Interactive update script for Traefik and Traefik Manager.
+${TAB}Performs environment and dependency checks, downloads the latest
+${TAB}stable release (or a specified version), creates a backup, and
+${TAB}automatically rolls back if the update fails.
+${TAB}
+${TAB}Both Traefik and Traefik Manager are updated to their latest
+${TAB}tagged releases, not bleeding-edge commits. This ensures
+${TAB}compatibility with each application's internal version checks.
+
+${BD}OPTIONS${CL}
+${TAB}${GN}(no arguments)${CL}
+${TAB}${TAB}Launch interactive mode with guided menu.
+
+${TAB}${GN}-y, --yes${CL}
+${TAB}${TAB}Update all components without prompts.
+
+${TAB}${GN}v<VERSION>${CL}  (e.g. v3.7.0)
+${TAB}${TAB}Update Traefik to a specific version.
+
+${TAB}${GN}--traefik-only${CL}
+${TAB}${TAB}Update Traefik binary only, skip Traefik Manager.
+
+${TAB}${GN}--manager-only${CL}
+${TAB}${TAB}Update Traefik Manager only, skip Traefik binary.
+
+${TAB}${GN}-h, --help${CL}
+${TAB}${TAB}Display this help and exit.
+
+${TAB}${GN}-V, --version${CL}
+${TAB}${TAB}Display script version and exit.
+
+${BD}CONFIGURATION${CL}
+${TAB}Edit the variables at the top of this script to match your setup.
+${TAB}File: ${BL}${SCRIPT_PATH}${CL}
+
+HELP
+
+    # Dynamically show config variables with line numbers
+    echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
+    echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
+    while IFS= read -r line; do
+        local linenum var val
+        linenum=$(echo "$line" | cut -d: -f1)
+        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
+        val=$(echo "$line" | cut -d= -f2- | tr -d '"')
+        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
+    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|^[0-9]*:set \|^[0-9]*:shopt \|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:HOLD=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|SKIP_\|SPECIFIC_\|INTERACTIVE\|LATEST_\|CURRENT_\|VM_IP\|FINAL_\|MISSING_\|STOPPED_\|CRITICAL_\|ENV_' | head -13)
+
+    cat <<HELP
+
+${BD}FILES${CL}
+${TAB}${BL}${TRAEFIK_BIN}${CL}
+${TAB}${TAB}Traefik binary location. Backup stored at ${TRAEFIK_BIN}.bak
+
+${TAB}${BL}${TRAEFIK_MANAGER_DIR}/${CL}
+${TAB}${TAB}Traefik Manager git repository and virtualenv.
+
+${BD}EXIT STATUS${CL}
+${TAB}${GN}0${CL}  Success or user cancelled (no changes made)
+${TAB}${RD}1${CL}  Error (failed preflight, download, install, or rollback)
+
+${BD}EXAMPLES${CL}
+${TAB}Update everything interactively:
+${TAB}  ${BL}sudo ${SCRIPT_NAME}${CL}
+
+${TAB}Update all without prompts (good for cron):
+${TAB}  ${BL}sudo ${SCRIPT_NAME} -y${CL}
+
+${TAB}Pin Traefik to a specific version:
+${TAB}  ${BL}sudo ${SCRIPT_NAME} v3.6.6${CL}
+
+${TAB}Update only Traefik Manager:
+${TAB}  ${BL}sudo ${SCRIPT_NAME} --manager-only${CL}
+
+${BD}SEE ALSO${CL}
+${TAB}Traefik releases:  ${BL}https://github.com/traefik/traefik/releases${CL}
+${TAB}Traefik Manager:   ${BL}https://github.com/${TRAEFIK_MANAGER_REPO}${CL}
+${TAB}Project repo:      ${BL}${SCRIPT_URL}${CL}
+
+${BD}LICENSE${CL}
+${TAB}MIT — ${SCRIPT_URL}/blob/main/LICENSE
+
+HELP
+    exit 0
 }
 
 msg_info() {
@@ -110,12 +214,31 @@ get_current_traefik_version() {
     "${TRAEFIK_BIN}" version 2>/dev/null | grep "Version:" | awk '{print $2}' || echo "unknown"
 }
 
+get_latest_manager_release() {
+    curl -s "https://api.github.com/repos/${TRAEFIK_MANAGER_REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+}
+
+get_current_manager_version() {
+    if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
+        cd "${TRAEFIK_MANAGER_DIR}"
+        # Try to get the current tag, fall back to commit hash
+        local tag
+        tag=$(sudo -u "${TRAEFIK_MANAGER_USER}" git describe --tags --exact-match HEAD 2>/dev/null || echo "")
+        if [[ -n "$tag" ]]; then
+            echo "$tag"
+        else
+            echo "commit-$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short HEAD 2>/dev/null)"
+        fi
+    else
+        echo "unknown"
+    fi
+}
+
 get_vm_ip() {
     hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown"
 }
 
 version_ge() {
-    # Returns 0 if $1 >= $2 (semantic version comparison)
     printf '%s\n%s' "$2" "$1" | sort -V -C
 }
 
@@ -471,35 +594,51 @@ update_manager() {
 
     cd "${TRAEFIK_MANAGER_DIR}"
 
-    local current_commit remote_commit
-    current_commit=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short HEAD 2>/dev/null)
-    sudo -u "${TRAEFIK_MANAGER_USER}" git fetch origin main --quiet 2>/dev/null
+    # Ensure we're on main branch (not detached HEAD)
+    local current_branch
+    current_branch=$(sudo -u "${TRAEFIK_MANAGER_USER}" git branch --show-current 2>/dev/null)
+    if [[ "$current_branch" != "main" ]]; then
+        msg_warn "Not on main branch (${current_branch:-detached HEAD}), switching to main"
+        sudo -u "${TRAEFIK_MANAGER_USER}" git checkout main --quiet 2>/dev/null
+    fi
 
+    # Fetch latest from remote
+    sudo -u "${TRAEFIK_MANAGER_USER}" git fetch origin main --tags --quiet 2>/dev/null
+
+    # Compare local vs remote
     local local_hash remote_hash
     local_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse HEAD)
     remote_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse origin/main)
 
+    local current_version
+    current_version=$(get_current_manager_version)
+
     if [[ "$local_hash" == "$remote_hash" ]]; then
-        msg_ok "Traefik Manager is up to date (${GN}${current_commit}${CL})"
+        msg_ok "Traefik Manager is up to date (${GN}${current_version}${CL})"
         return 0
     fi
 
-    remote_commit=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short origin/main)
+    # Determine what we're updating to
+    local remote_version
+    remote_version=$(sudo -u "${TRAEFIK_MANAGER_USER}" git describe --tags origin/main 2>/dev/null || echo "$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short origin/main)")
+
     echo ""
-    echo -e "${TAB}${BL}Manager: ${RD}${current_commit}${CL} → ${GN}${remote_commit}${CL}"
+    echo -e "${TAB}${BL}Manager: ${RD}${current_version}${CL} → ${GN}${remote_version}${CL}"
     echo ""
 
-    # Pull
+    # Pull latest on main branch
     msg_info "Pulling latest changes"
-    sudo -u "${TRAEFIK_MANAGER_USER}" git pull origin main --quiet
+    if ! sudo -u "${TRAEFIK_MANAGER_USER}" git pull origin main --quiet 2>/dev/null; then
+        msg_error "Failed to pull latest changes"
+        echo -e "${TAB}  There may be local modifications. Check: ${YW}git status${CL}"
+        return 1
+    fi
     msg_ok "Pulled latest changes"
 
-    # Check for dependency updates
-    if sudo -u "${TRAEFIK_MANAGER_USER}" git diff HEAD~1 --name-only 2>/dev/null | grep -q "requirements.txt"; then
-        msg_info "Updating Python dependencies"
-        sudo -u "${TRAEFIK_MANAGER_USER}" "${TRAEFIK_MANAGER_DIR}/venv/bin/pip" install -r requirements.txt --quiet 2>/dev/null
-        msg_ok "Python dependencies updated"
-    fi
+    # Update Python dependencies (always run per developer's update guide)
+    msg_info "Updating Python dependencies"
+    sudo -u "${TRAEFIK_MANAGER_USER}" "${TRAEFIK_MANAGER_DIR}/venv/bin/pip" install -r requirements.txt gunicorn --quiet 2>/dev/null
+    msg_ok "Python dependencies updated"
 
     # Restart
     msg_info "Restarting ${TRAEFIK_MANAGER_SERVICE} service"
@@ -507,9 +646,9 @@ update_manager() {
     sleep 2
 
     if systemctl is-active --quiet "${TRAEFIK_MANAGER_SERVICE}.service"; then
-        local new_commit
-        new_commit=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short HEAD)
-        msg_ok "Traefik Manager running — commit ${GN}${new_commit}${CL}"
+        local new_version
+        new_version=$(get_current_manager_version)
+        msg_ok "Traefik Manager running — ${GN}${new_version}${CL}"
     else
         msg_error "Traefik Manager failed to start!"
         echo -e "${TAB}  Run: ${YW}sudo systemctl status ${TRAEFIK_MANAGER_SERVICE}${CL}"
@@ -521,23 +660,13 @@ update_manager() {
 # MAIN
 # ============================================================
 
-# Early exit for help (before any checks)
+# Early exit for help and version (before any checks)
 for arg in "${@:-}"; do
     case "${arg:-}" in
-        --help|-h)
-            header_info
-            echo -e "${TAB}${BL}Usage:${CL}"
-            echo -e "${TAB}  update-traefik               Interactive mode"
-            echo -e "${TAB}  update-traefik -y             Update all without prompts"
-            echo -e "${TAB}  update-traefik v3.7.0         Update Traefik to specific version"
-            echo -e "${TAB}  update-traefik --traefik-only Skip Traefik Manager"
-            echo -e "${TAB}  update-traefik --manager-only Skip Traefik binary"
-            echo -e "${TAB}  update-traefik -h             Show this help"
-            echo ""
-            echo -e "${TAB}${BL}Configuration:${CL}"
-            echo -e "${TAB}  Edit the variables at the top of this script to match"
-            echo -e "${TAB}  your install paths, service names, and ports."
-            echo ""
+        --help|-h) show_help ;;
+        --version|-V)
+            echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+            echo "${SCRIPT_URL}"
             exit 0
             ;;
     esac
@@ -557,26 +686,44 @@ preflight_checks
 # Fetch version info
 LATEST_TRAEFIK=$(get_latest_traefik_version)
 CURRENT_TRAEFIK=$(get_current_traefik_version)
+CURRENT_MANAGER=$(get_current_manager_version)
 VM_IP=$(get_vm_ip)
+
+# Pre-fetch Manager remote info for status display
+MANAGER_UP_TO_DATE=true
+MANAGER_REMOTE_VERSION=""
+if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
+    cd "${TRAEFIK_MANAGER_DIR}"
+    # Ensure on main branch for accurate comparison
+    local_branch=$(sudo -u "${TRAEFIK_MANAGER_USER}" git branch --show-current 2>/dev/null)
+    if [[ "$local_branch" != "main" ]]; then
+        sudo -u "${TRAEFIK_MANAGER_USER}" git checkout main --quiet 2>/dev/null
+        CURRENT_MANAGER=$(get_current_manager_version)
+    fi
+    sudo -u "${TRAEFIK_MANAGER_USER}" git fetch origin main --tags --quiet 2>/dev/null
+    local_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse HEAD 2>/dev/null)
+    remote_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse origin/main 2>/dev/null)
+    MANAGER_REMOTE_VERSION=$(sudo -u "${TRAEFIK_MANAGER_USER}" git describe --tags origin/main 2>/dev/null || echo "$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short origin/main)")
+    if [[ "$local_hash" != "$remote_hash" ]]; then
+        MANAGER_UP_TO_DATE=false
+    fi
+fi
 
 # Status display
 echo -e "${TAB}${BL}Current Status:${CL}"
-CURRENT_CLEAN=$(echo "$CURRENT_TRAEFIK" | sed 's/^v//')
-LATEST_CLEAN=$(echo "$LATEST_TRAEFIK" | sed 's/^v//')
-if [[ "$CURRENT_CLEAN" == "$LATEST_CLEAN" ]]; then
+CURRENT_T_CLEAN=$(echo "$CURRENT_TRAEFIK" | sed 's/^v//')
+LATEST_T_CLEAN=$(echo "$LATEST_TRAEFIK" | sed 's/^v//')
+if [[ "$CURRENT_T_CLEAN" == "$LATEST_T_CLEAN" ]]; then
     echo -e "${TAB}  Traefik:  ${GN}${CURRENT_TRAEFIK} (up to date)${CL}"
 else
     echo -e "${TAB}  Traefik:  ${YW}${CURRENT_TRAEFIK}${CL} → ${GN}${LATEST_TRAEFIK} available${CL}"
 fi
 
 if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
-    cd "${TRAEFIK_MANAGER_DIR}"
-    MC=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short HEAD 2>/dev/null)
-    MR=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short origin/main 2>/dev/null)
-    if [[ "$MC" == "$MR" ]]; then
-        echo -e "${TAB}  Manager:  ${GN}${MC} (up to date)${CL}"
+    if [[ "$MANAGER_UP_TO_DATE" == true ]]; then
+        echo -e "${TAB}  Manager:  ${GN}${CURRENT_MANAGER} (up to date)${CL}"
     else
-        echo -e "${TAB}  Manager:  ${YW}${MC}${CL} → ${GN}${MR} available${CL}"
+        echo -e "${TAB}  Manager:  ${YW}${CURRENT_MANAGER}${CL} → ${GN}${MANAGER_REMOTE_VERSION} available${CL}"
     fi
 fi
 echo ""
@@ -660,13 +807,12 @@ echo ""
 echo -e "${TAB}${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo ""
 FINAL_TRAEFIK=$(get_current_traefik_version)
+FINAL_MANAGER=$(get_current_manager_version)
 echo -e "${TAB}${GN}✓ Update complete!${CL}"
 echo ""
 echo -e "${TAB}  Traefik:          ${GN}${FINAL_TRAEFIK}${CL}"
 if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
-    cd "${TRAEFIK_MANAGER_DIR}"
-    FINAL_COMMIT=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short HEAD 2>/dev/null)
-    echo -e "${TAB}  Manager:          ${GN}${FINAL_COMMIT}${CL}"
+    echo -e "${TAB}  Manager:          ${GN}${FINAL_MANAGER}${CL}"
 fi
 echo ""
 echo -e "${TAB}${BL}Dashboards:${CL}"
