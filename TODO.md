@@ -29,8 +29,29 @@
 - [ ] Add `--all` flag to clear all stale locks without specifying a CTID
 - [ ] Add `--dry-run` flag to show what would be cleared without doing it
 
+### pihole-sync.sh
+- [x] Teleporter-based backup and sync
+- [x] SSH key-based auth to backup Pi-hole
+- [x] Preflight checks (pihole-FTL, SSH, disk space)
+- [x] Local backup archive with retention
+- [x] Backup-only mode
+- [x] List backups mode
+- [x] Automated mode (-y) for cron
+- [x] CTRL+C safe
+- [x] Man-style help with dynamic config line numbers
+- [ ] Support for multiple backup targets (sync to 2+ Pi-holes)
+- [ ] Selective sync (blocklists only, DNS only, etc.)
+- [ ] Diff display before import (show what would change)
+
 ## Planned Scripts
 
+(none currently — add ideas here)
+
+## Ideas to Investigate
+
+- Proxmox VM template builder — automate creating base VM templates with common packages
+- SSL cert monitor — check all reverse proxy certs across multiple hosts, alert on expiry
+- Bulk snapshot cleanup — age-based cleanup across VMs and LXCs
 (none currently — add ideas here)
 
 ## Ideas to Investigate
