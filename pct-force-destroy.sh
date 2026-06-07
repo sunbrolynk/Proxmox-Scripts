@@ -73,7 +73,15 @@ show_help() {
     echo ""
     echo -e "${BD}OPTIONS${CL}"
     echo -e "${TAB}${GN}<CTID>${CL}"
-    echo -e "${TAB}${TAB}Container ID to destroy (required)."
+    echo -e "${TAB}${TAB}Container ID to destroy (required unless --all)."
+    echo ""
+    echo -e "${TAB}${GN}--all${CL}"
+    echo -e "${TAB}${TAB}Clear all stale locks on this node without destroying"
+    echo -e "${TAB}${TAB}any containers. Useful after a storage hiccup."
+    echo ""
+    echo -e "${TAB}${GN}--dry-run${CL}"
+    echo -e "${TAB}${TAB}Show what locks would be cleared without doing anything."
+    echo -e "${TAB}${TAB}Can be used with a CTID or with --all."
     echo ""
     echo -e "${TAB}${GN}-h, --help${CL}"
     echo -e "${TAB}${TAB}Display this help and exit."
@@ -97,6 +105,15 @@ show_help() {
     echo -e "${BD}EXAMPLES${CL}"
     echo -e "${TAB}Force destroy container 105:"
     echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME} 105${CL}"
+    echo ""
+    echo -e "${TAB}Clear all stale locks without destroying anything:"
+    echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME} --all${CL}"
+    echo ""
+    echo -e "${TAB}Preview what locks would be cleared for container 105:"
+    echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME} --dry-run 105${CL}"
+    echo ""
+    echo -e "${TAB}Preview all stale locks on this node:"
+    echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME} --dry-run --all${CL}"
     echo ""
     echo -e "${TAB}Deploy to all cluster nodes:"
     echo -e "${TAB}  ${BL}for node in node1-ip node2-ip node3-ip; do${CL}"
@@ -138,23 +155,104 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Argument check
-CTID="${1:-}"
-if [[ -z "$CTID" ]]; then
+# Parse arguments
+DRY_RUN=false
+CLEAR_ALL=false
+CTID=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=true ;;
+        --all) CLEAR_ALL=true ;;
+        -h|--help|-V|--version) ;; # already handled
+        *)
+            if [[ "$arg" =~ ^[0-9]+$ ]]; then
+                CTID="$arg"
+            else
+                msg_error "Invalid argument: ${arg}"
+                echo -e "${TAB}  Help: ${BL}${SCRIPT_NAME} -h${CL}"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+# Validate: need either CTID or --all
+if [[ -z "$CTID" ]] && [[ "$CLEAR_ALL" == false ]]; then
     msg_error "No container ID specified"
     echo -e "${TAB}  Usage: ${BL}${SCRIPT_NAME} <CTID>${CL}"
+    echo -e "${TAB}  Or:    ${BL}${SCRIPT_NAME} --all${CL}"
     echo -e "${TAB}  Help:  ${BL}${SCRIPT_NAME} -h${CL}"
     exit 1
 fi
 
-# Validate CTID is a number
-if ! [[ "$CTID" =~ ^[0-9]+$ ]]; then
-    msg_error "Invalid container ID: ${CTID}"
-    exit 1
+# ============================================================
+# MODE: --all (clear all stale locks, no destroy)
+# ============================================================
+
+if [[ "$CLEAR_ALL" == true ]]; then
+    header_info
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${TAB}${BD}Dry Run — Clear All Stale Locks${CL}"
+    else
+        echo -e "${TAB}${BD}Clear All Stale Locks${CL}"
+    fi
+    echo ""
+
+    # PVE config locks
+    PVE_LOCKS=(/run/lock/lxc/pve-config-*.lock)
+    if [[ ${#PVE_LOCKS[@]} -gt 0 ]]; then
+        for lockfile in "${PVE_LOCKS[@]}"; do
+            lockname=$(basename "$lockfile")
+            if [[ "$DRY_RUN" == true ]]; then
+                msg_warn "Would clear: ${lockname}"
+            else
+                rm -f "$lockfile"
+                msg_ok "Cleared: ${lockname}"
+            fi
+        done
+    else
+        msg_ok "No stale PVE config locks found"
+    fi
+
+    # CFS storage locks
+    CFS_LOCKS=(/etc/pve/priv/lock/storage-*)
+    if [[ ${#CFS_LOCKS[@]} -gt 0 ]]; then
+        for lockdir in "${CFS_LOCKS[@]}"; do
+            if [[ -e "$lockdir" ]]; then
+                lockname=$(basename "$lockdir")
+                if [[ "$DRY_RUN" == true ]]; then
+                    msg_warn "Would clear: ${lockname}"
+                else
+                    rm -rf "$lockdir"
+                    msg_ok "Cleared: ${lockname}"
+                fi
+            fi
+        done
+    else
+        msg_ok "No stale CFS storage locks found"
+    fi
+
+    echo ""
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_ok "Dry run complete. No changes made."
+    else
+        msg_ok "All stale locks cleared"
+    fi
+    echo ""
+    exit 0
 fi
 
+# ============================================================
+# MODE: Standard destroy (with optional --dry-run)
+# ============================================================
+
 header_info
-echo -e "${TAB}${BD}Force Destroy CT ${CTID}${CL}"
+if [[ "$DRY_RUN" == true ]]; then
+    echo -e "${TAB}${BD}Dry Run — Force Destroy CT ${CTID}${CL}"
+else
+    echo -e "${TAB}${BD}Force Destroy CT ${CTID}${CL}"
+fi
 echo ""
 
 # Check container exists
@@ -175,8 +273,12 @@ msg_ok "Container ${CTID} is stopped"
 
 # Clear PVE config lock
 if [[ -f "/run/lock/lxc/pve-config-${CTID}.lock" ]]; then
-    rm -f "/run/lock/lxc/pve-config-${CTID}.lock"
-    msg_ok "Cleared PVE config lock"
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_warn "Would clear PVE config lock"
+    else
+        rm -f "/run/lock/lxc/pve-config-${CTID}.lock"
+        msg_ok "Cleared PVE config lock"
+    fi
 else
     msg_ok "No PVE config lock found"
 fi
@@ -186,8 +288,12 @@ LOCKS_CLEARED=0
 for lockdir in /etc/pve/priv/lock/storage-*; do
     if [[ -e "$lockdir" ]]; then
         lockname=$(basename "$lockdir")
-        rm -rf "$lockdir"
-        msg_ok "Cleared CFS lock: ${lockname}"
+        if [[ "$DRY_RUN" == true ]]; then
+            msg_warn "Would clear CFS lock: ${lockname}"
+        else
+            rm -rf "$lockdir"
+            msg_ok "Cleared CFS lock: ${lockname}"
+        fi
         LOCKS_CLEARED=$((LOCKS_CLEARED + 1))
     fi
 done
@@ -195,16 +301,23 @@ if [[ $LOCKS_CLEARED -eq 0 ]]; then
     msg_ok "No CFS storage locks found"
 fi
 
-# Destroy
-msg_info "Destroying container ${CTID}"
-if pct destroy "$CTID" --purge --force 2>&1; then
-    msg_done "Container ${CTID} destroyed successfully"
+# Destroy (skip in dry-run)
+if [[ "$DRY_RUN" == true ]]; then
+    echo ""
+    msg_warn "Would run: pct destroy ${CTID} --purge --force"
+    echo ""
+    msg_ok "Dry run complete. No changes made."
 else
-    msg_error "Destroy failed"
-    echo -e "${TAB}  The storage backend may be unresponsive."
-    echo -e "${TAB}  Check NFS mounts: ${BL}mount | grep nfs${CL}"
-    echo -e "${TAB}  Check connectivity: ${BL}ping <NAS-IP>${CL}"
-    exit 1
+    msg_info "Destroying container ${CTID}"
+    if pct destroy "$CTID" --purge --force 2>&1; then
+        msg_done "Container ${CTID} destroyed successfully"
+    else
+        msg_error "Destroy failed"
+        echo -e "${TAB}  The storage backend may be unresponsive."
+        echo -e "${TAB}  Check NFS mounts: ${BL}mount | grep nfs${CL}"
+        echo -e "${TAB}  Check connectivity: ${BL}ping <NAS-IP>${CL}"
+        exit 1
+    fi
 fi
 
 echo ""
