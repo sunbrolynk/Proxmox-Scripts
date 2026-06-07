@@ -500,38 +500,80 @@ fi
 AUTO_YES=false
 BACKUP_ONLY=false
 SKIP_SETTINGS=false
+INTERACTIVE=true
 
 for arg in "${@:-}"; do
     case "${arg:-}" in
-        --yes|-y) AUTO_YES=true ;;
-        --backup-only) BACKUP_ONLY=true ;;
-        --skip-settings) SKIP_SETTINGS=true ;;
+        --yes|-y) AUTO_YES=true; INTERACTIVE=false ;;
+        --backup-only) BACKUP_ONLY=true; INTERACTIVE=false ;;
+        --skip-settings) SKIP_SETTINGS=true; INTERACTIVE=false ;;
     esac
 done
 
 # Preflight
 preflight_checks
 
+# Interactive menu
+if [[ "$INTERACTIVE" == true ]]; then
+    PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    echo -e "${TAB}${BL}Primary:${CL}  ${GN}${PRIMARY_IP}${CL} (this machine)"
+    for TARGET in ${BACKUP_PIHOLES}; do
+        echo -e "${TAB}${BL}Backup:${CL}   ${GN}${TARGET}${CL}"
+    done
+    echo ""
+    echo -e "${TAB}${BL}What would you like to do?${CL}"
+    echo ""
+    echo -e "${TAB}  ${GN}1)${CL} Full sync (overwrite backup config entirely)"
+    echo -e "${TAB}  ${GN}2)${CL} Sync but keep backup's settings (skip passwords/network)"
+    echo -e "${TAB}  ${GN}3)${CL} Show diff (compare primary vs backup, no changes)"
+    echo -e "${TAB}  ${GN}4)${CL} Backup only (local archive, no sync)"
+    echo -e "${TAB}  ${GN}5)${CL} List stored backups"
+    echo -e "${TAB}  ${RD}q)${CL} Quit"
+    echo ""
+    read -rp "  Select an option [1-5/q]: " choice
+
+    case "$choice" in
+        1) ;;
+        2) SKIP_SETTINGS=true ;;
+        3) show_diff ;;
+        4) BACKUP_ONLY=true ;;
+        5) list_backups ;;
+        q|Q)
+            echo ""
+            msg_ok "Exiting. No changes made."
+            echo ""
+            exit 0
+            ;;
+        *)
+            msg_error "Invalid option"
+            exit 1
+            ;;
+    esac
+    echo ""
+fi
+
 # Show what we're about to do
 PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-echo -e "${TAB}${BL}Sync Plan:${CL}"
-echo -e "${TAB}  Primary:  ${GN}${PRIMARY_IP}${CL} (this machine)"
-if [[ "$BACKUP_ONLY" == true ]]; then
-    echo -e "${TAB}  Mode:     ${YW}Backup only (no sync)${CL}"
-else
-    for TARGET in ${BACKUP_PIHOLES}; do
-        echo -e "${TAB}  Backup:   ${GN}${TARGET}${CL}"
-    done
-    if [[ "$SKIP_SETTINGS" == true ]]; then
-        echo -e "${TAB}  Mode:     ${GN}Sync (skip settings)${CL}"
+if [[ "$INTERACTIVE" == false ]]; then
+    echo -e "${TAB}${BL}Sync Plan:${CL}"
+    echo -e "${TAB}  Primary:  ${GN}${PRIMARY_IP}${CL} (this machine)"
+    if [[ "$BACKUP_ONLY" == true ]]; then
+        echo -e "${TAB}  Mode:     ${YW}Backup only (no sync)${CL}"
     else
-        echo -e "${TAB}  Mode:     ${GN}Full sync${CL}"
+        for TARGET in ${BACKUP_PIHOLES}; do
+            echo -e "${TAB}  Backup:   ${GN}${TARGET}${CL}"
+        done
+        if [[ "$SKIP_SETTINGS" == true ]]; then
+            echo -e "${TAB}  Mode:     ${GN}Sync (skip settings)${CL}"
+        else
+            echo -e "${TAB}  Mode:     ${GN}Full sync${CL}"
+        fi
     fi
+    echo ""
 fi
-echo ""
 
-# Confirm
-if [[ "$AUTO_YES" == false ]]; then
+# Confirm (skip if -y or interactive menu already chose)
+if [[ "$AUTO_YES" == false ]] && [[ "$INTERACTIVE" == false ]]; then
     if [[ "$BACKUP_ONLY" == true ]]; then
         read -rp "  Create Teleporter backup? [y/N]: " confirm
     else
