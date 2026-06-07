@@ -10,9 +10,10 @@
 # ============================================================
 # CONFIGURATION — adjust these for your setup
 # ============================================================
-BACKUP_PIHOLE="192.168.1.2"           # IP of the backup Pi-hole
-BACKUP_SSH_USER="root"                # SSH user on the backup Pi-hole
-BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole
+BACKUP_PIHOLES="192.168.1.2"          # Backup Pi-hole IP(s), space-separated for multiple
+                                      # Example: "192.168.1.2 192.168.1.3 192.168.1.4"
+BACKUP_SSH_USER="root"                # SSH user on the backup Pi-hole(s)
+BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole(s)
 LOCAL_BACKUP_DIR="/var/backups/pihole" # Where to store Teleporter archives locally
 RETENTION_COUNT=7                     # Number of local backups to keep
 # ============================================================
@@ -97,6 +98,14 @@ show_help() {
     echo -e "${TAB}${GN}--backup-only${CL}"
     echo -e "${TAB}${TAB}Create a local Teleporter backup without syncing."
     echo ""
+    echo -e "${TAB}${GN}--skip-settings${CL}"
+    echo -e "${TAB}${TAB}Sync blocklists and DNS but preserve each backup's"
+    echo -e "${TAB}${TAB}unique settings (passwords, network config, etc.)."
+    echo ""
+    echo -e "${TAB}${GN}--diff${CL}"
+    echo -e "${TAB}${TAB}Show what differs between primary and backup(s)"
+    echo -e "${TAB}${TAB}without syncing. Compares adlists, domains, clients."
+    echo ""
     echo -e "${TAB}${GN}--list${CL}"
     echo -e "${TAB}${TAB}List local Teleporter backups."
     echo ""
@@ -124,9 +133,9 @@ show_help() {
 
     echo ""
     echo -e "${BD}PREREQUISITES${CL}"
-    echo -e "${TAB}• Pi-hole v6+ on both primary and backup"
-    echo -e "${TAB}• SSH key-based auth from primary to backup"
-    echo -e "${TAB}  Set up with: ${BL}ssh-copy-id ${BACKUP_SSH_USER}@${BACKUP_PIHOLE}${CL}"
+    echo -e "${TAB}• Pi-hole v6+ on primary and all backups"
+    echo -e "${TAB}• SSH key-based auth from primary to each backup"
+    echo -e "${TAB}  Set up with: ${BL}ssh-copy-id ${BACKUP_SSH_USER}@<backup-ip>${CL}"
     echo ""
     echo -e "${BD}FILES${CL}"
     echo -e "${TAB}${BL}${LOCAL_BACKUP_DIR}/${CL}"
@@ -201,26 +210,28 @@ preflight_checks() {
         CRITICAL=true
     fi
 
-    # SSH to backup
-    msg_info "Testing SSH to backup (${BACKUP_PIHOLE})"
-    if ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${BACKUP_PIHOLE}" "echo ok" &>/dev/null; then
-        msg_ok "SSH to backup (${BACKUP_PIHOLE}) connected"
-    else
-        msg_error "Cannot SSH to ${BACKUP_SSH_USER}@${BACKUP_PIHOLE}:${BACKUP_SSH_PORT}"
-        echo -e "${TAB}  Set up key auth: ${BL}ssh-copy-id ${BACKUP_SSH_USER}@${BACKUP_PIHOLE}${CL}"
-        CRITICAL=true
-    fi
-
-    # pihole-FTL on backup
-    if [[ "$CRITICAL" == false ]]; then
-        msg_info "Checking pihole-FTL on backup"
-        if ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${BACKUP_PIHOLE}" "command -v pihole-FTL" &>/dev/null; then
-            msg_ok "pihole-FTL found on backup"
+    # SSH to backup(s)
+    for TARGET in ${BACKUP_PIHOLES}; do
+        msg_info "Testing SSH to backup (${TARGET})"
+        if ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
+            msg_ok "SSH to backup (${TARGET}) connected"
         else
-            msg_error "pihole-FTL not found on backup Pi-hole"
+            msg_error "Cannot SSH to ${BACKUP_SSH_USER}@${TARGET}:${BACKUP_SSH_PORT}"
+            echo -e "${TAB}  Set up key auth: ${BL}ssh-copy-id ${BACKUP_SSH_USER}@${TARGET}${CL}"
             CRITICAL=true
         fi
-    fi
+
+        # pihole-FTL on backup
+        if [[ "$CRITICAL" == false ]]; then
+            msg_info "Checking pihole-FTL on ${TARGET}"
+            if ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" "command -v pihole-FTL" &>/dev/null; then
+                msg_ok "pihole-FTL found on ${TARGET}"
+            else
+                msg_error "pihole-FTL not found on ${TARGET}"
+                CRITICAL=true
+            fi
+        fi
+    done
 
     # Backup directory
     if [[ ! -d "${LOCAL_BACKUP_DIR}" ]]; then
@@ -301,26 +312,40 @@ create_backup() {
 }
 
 transfer_backup() {
-    msg_info "Transferring backup to ${BACKUP_PIHOLE}"
+    local TARGET="$1"
+    msg_info "Transferring backup to ${TARGET}"
 
-    if ! scp -P "${BACKUP_SSH_PORT}" -o BatchMode=yes "$BACKUP_FILE" "${BACKUP_SSH_USER}@${BACKUP_PIHOLE}:/tmp/${BACKUP_NAME}" &>/dev/null; then
-        msg_error "Transfer failed"
-        echo -e "${TAB}  Check SSH connection: ${BL}ssh ${BACKUP_SSH_USER}@${BACKUP_PIHOLE}${CL}"
+    if ! scp -P "${BACKUP_SSH_PORT}" -o BatchMode=yes "$BACKUP_FILE" "${BACKUP_SSH_USER}@${TARGET}:/tmp/${BACKUP_NAME}" &>/dev/null; then
+        msg_error "Transfer failed to ${TARGET}"
+        echo -e "${TAB}  Check SSH connection: ${BL}ssh ${BACKUP_SSH_USER}@${TARGET}${CL}"
         return 1
     fi
 
-    msg_ok "Transferred to ${BACKUP_PIHOLE}:/tmp/${BACKUP_NAME}"
+    msg_ok "Transferred to ${TARGET}:/tmp/${BACKUP_NAME}"
 }
 
 import_backup() {
-    msg_info "Importing configuration on backup Pi-hole"
+    local TARGET="$1"
+    local IMPORT_FILE="${BACKUP_NAME}"
+
+    # If --skip-settings, strip pihole.toml from the archive
+    if [[ "$SKIP_SETTINGS" == true ]]; then
+        msg_info "Preparing archive (skipping settings)"
+        local STRIPPED_NAME="stripped_${BACKUP_NAME}"
+        ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+            "cd /tmp && cp '${BACKUP_NAME}' '${STRIPPED_NAME}' && zip -d '${STRIPPED_NAME}' 'etc/pihole/pihole.toml' 2>/dev/null; true" &>/dev/null
+        IMPORT_FILE="${STRIPPED_NAME}"
+        msg_ok "Settings excluded from import"
+    fi
+
+    msg_info "Importing configuration on ${TARGET}"
 
     local IMPORT_OUTPUT
-    IMPORT_OUTPUT=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${BACKUP_PIHOLE}" \
-        "pihole-FTL --teleporter /tmp/${BACKUP_NAME} 2>&1")
+    IMPORT_OUTPUT=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+        "pihole-FTL --teleporter /tmp/${IMPORT_FILE} 2>&1")
 
     if [[ $? -ne 0 ]]; then
-        msg_error "Import failed on backup Pi-hole"
+        msg_error "Import failed on ${TARGET}"
         echo -e "${TAB}  Output: ${IMPORT_OUTPUT}"
         return 1
     fi
@@ -329,25 +354,26 @@ import_backup() {
     local IMPORT_COUNT
     IMPORT_COUNT=$(echo "$IMPORT_OUTPUT" | grep -c "^Imported" || echo "0")
 
-    msg_ok "Imported ${IMPORT_COUNT} items on backup Pi-hole"
+    msg_ok "Imported ${IMPORT_COUNT} items on ${TARGET}"
 }
 
 reload_backup_dns() {
-    msg_info "Reloading DNS on backup Pi-hole"
+    local TARGET="$1"
+    msg_info "Reloading DNS on ${TARGET}"
 
-    if ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${BACKUP_PIHOLE}" \
+    if ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
         "pihole reloaddns" &>/dev/null; then
-        msg_ok "DNS reloaded on backup Pi-hole"
+        msg_ok "DNS reloaded on ${TARGET}"
     else
-        msg_warn "DNS reload returned non-zero — may need manual restart"
-        echo -e "${TAB}  Run: ${BL}ssh ${BACKUP_SSH_USER}@${BACKUP_PIHOLE} 'pihole reloaddns'${CL}"
+        msg_warn "DNS reload returned non-zero on ${TARGET}"
+        echo -e "${TAB}  Run: ${BL}ssh ${BACKUP_SSH_USER}@${TARGET} 'pihole reloaddns'${CL}"
     fi
 }
 
 cleanup_remote() {
-    # Clean up temp file on backup
-    ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${BACKUP_PIHOLE}" \
-        "rm -f /tmp/${BACKUP_NAME}" &>/dev/null || true
+    local TARGET="$1"
+    ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+        "rm -f /tmp/${BACKUP_NAME} /tmp/stripped_${BACKUP_NAME}" &>/dev/null || true
 }
 
 prune_backups() {
@@ -393,11 +419,62 @@ list_backups() {
     exit 0
 }
 
+show_diff() {
+    header_info
+    echo -e "${TAB}${BL}Configuration Diff: Primary vs Backup(s)${CL}"
+    echo ""
+
+    # Query primary counts
+    local P_ADLISTS P_DOMAINS P_CLIENTS P_GROUPS
+    P_ADLISTS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM adlist" 2>/dev/null || echo "?")
+    P_DOMAINS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM domainlist" 2>/dev/null || echo "?")
+    P_CLIENTS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM client" 2>/dev/null || echo "?")
+    P_GROUPS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM 'group'" 2>/dev/null || echo "?")
+
+    PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    echo -e "${TAB}${BD}Primary (${PRIMARY_IP}):${CL}"
+    echo -e "${TAB}  Adlists:    ${GN}${P_ADLISTS}${CL}"
+    echo -e "${TAB}  Domains:    ${GN}${P_DOMAINS}${CL}"
+    echo -e "${TAB}  Clients:    ${GN}${P_CLIENTS}${CL}"
+    echo -e "${TAB}  Groups:     ${GN}${P_GROUPS}${CL}"
+    echo ""
+
+    for TARGET in ${BACKUP_PIHOLES}; do
+        # Query backup counts via SSH
+        local B_ADLISTS B_DOMAINS B_CLIENTS B_GROUPS
+        B_ADLISTS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes -o ConnectTimeout=5 "${BACKUP_SSH_USER}@${TARGET}" \
+            "sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM adlist'" 2>/dev/null || echo "?")
+        B_DOMAINS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+            "sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM domainlist'" 2>/dev/null || echo "?")
+        B_CLIENTS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+            "sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM client'" 2>/dev/null || echo "?")
+        B_GROUPS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+            "sqlite3 /etc/pihole/gravity.db \"SELECT COUNT(*) FROM 'group'\"" 2>/dev/null || echo "?")
+
+        echo -e "${TAB}${BD}Backup (${TARGET}):${CL}"
+
+        # Compare and colorize
+        for label_var in "Adlists:P_ADLISTS:B_ADLISTS" "Domains:P_DOMAINS:B_DOMAINS" "Clients:P_CLIENTS:B_CLIENTS" "Groups:P_GROUPS:B_GROUPS"; do
+            IFS=: read -r label pvar bvar <<< "$label_var"
+            local pval="${!pvar}"
+            local bval="${!bvar}"
+            if [[ "$pval" == "$bval" ]]; then
+                echo -e "${TAB}  ${label}$(printf '%*s' $((12 - ${#label})) '')${GN}${bval} (in sync)${CL}"
+            else
+                echo -e "${TAB}  ${label}$(printf '%*s' $((12 - ${#label})) '')${RD}${bval}${CL} (primary: ${GN}${pval}${CL})"
+            fi
+        done
+        echo ""
+    done
+
+    exit 0
+}
+
 # ============================================================
 # MAIN
 # ============================================================
 
-# Early exit for help, version, list
+# Early exit for help, version, list, diff
 for arg in "${@:-}"; do
     case "${arg:-}" in
         --help|-h) show_help ;;
@@ -407,6 +484,7 @@ for arg in "${@:-}"; do
             exit 0
             ;;
         --list) list_backups ;;
+        --diff) show_diff ;;
     esac
 done
 
@@ -421,11 +499,13 @@ fi
 # Parse flags
 AUTO_YES=false
 BACKUP_ONLY=false
+SKIP_SETTINGS=false
 
 for arg in "${@:-}"; do
     case "${arg:-}" in
         --yes|-y) AUTO_YES=true ;;
         --backup-only) BACKUP_ONLY=true ;;
+        --skip-settings) SKIP_SETTINGS=true ;;
     esac
 done
 
@@ -439,8 +519,14 @@ echo -e "${TAB}  Primary:  ${GN}${PRIMARY_IP}${CL} (this machine)"
 if [[ "$BACKUP_ONLY" == true ]]; then
     echo -e "${TAB}  Mode:     ${YW}Backup only (no sync)${CL}"
 else
-    echo -e "${TAB}  Backup:   ${GN}${BACKUP_PIHOLE}${CL}"
-    echo -e "${TAB}  Mode:     ${GN}Full sync${CL}"
+    for TARGET in ${BACKUP_PIHOLES}; do
+        echo -e "${TAB}  Backup:   ${GN}${TARGET}${CL}"
+    done
+    if [[ "$SKIP_SETTINGS" == true ]]; then
+        echo -e "${TAB}  Mode:     ${GN}Sync (skip settings)${CL}"
+    else
+        echo -e "${TAB}  Mode:     ${GN}Full sync${CL}"
+    fi
 fi
 echo ""
 
@@ -449,7 +535,7 @@ if [[ "$AUTO_YES" == false ]]; then
     if [[ "$BACKUP_ONLY" == true ]]; then
         read -rp "  Create Teleporter backup? [y/N]: " confirm
     else
-        read -rp "  Sync primary → backup? This overwrites the backup's config. [y/N]: " confirm
+        read -rp "  Sync primary → backup(s)? This overwrites backup config. [y/N]: " confirm
     fi
     if [[ "${confirm,,}" != "y" ]]; then
         echo ""
@@ -481,20 +567,25 @@ if [[ "$BACKUP_ONLY" == true ]]; then
     exit 0
 fi
 
-# Transfer
-transfer_backup
+# Sync to each backup target
+SYNC_SUCCESS=()
+SYNC_FAILED=()
 
-# Import
-import_backup
+for TARGET in ${BACKUP_PIHOLES}; do
+    echo -e "${TAB}${BL}▸ Syncing to ${TARGET}${CL}"
+    echo ""
 
-# Reload DNS
-reload_backup_dns
-
-# Cleanup remote temp file
-cleanup_remote
+    if transfer_backup "$TARGET" && import_backup "$TARGET"; then
+        reload_backup_dns "$TARGET"
+        cleanup_remote "$TARGET"
+        SYNC_SUCCESS+=("$TARGET")
+    else
+        SYNC_FAILED+=("$TARGET")
+    fi
+    echo ""
+done
 
 # Prune old local backups
-echo ""
 prune_backups
 
 # Summary
@@ -504,12 +595,29 @@ echo ""
 echo -e "${TAB}${GN}✓ Sync complete!${CL}"
 echo ""
 echo -e "${TAB}  Primary:    ${GN}${PRIMARY_IP}${CL}"
-echo -e "${TAB}  Backup:     ${GN}${BACKUP_PIHOLE}${CL}"
 echo -e "${TAB}  Archive:    ${GN}${BACKUP_NAME}${CL}"
+if [[ "$SKIP_SETTINGS" == true ]]; then
+    echo -e "${TAB}  Mode:       ${GN}Skip settings${CL}"
+fi
+echo ""
+
+if [[ ${#SYNC_SUCCESS[@]} -gt 0 ]]; then
+    for TARGET in "${SYNC_SUCCESS[@]}"; do
+        echo -e "${TAB}  ${CM} ${TARGET}"
+    done
+fi
+if [[ ${#SYNC_FAILED[@]} -gt 0 ]]; then
+    for TARGET in "${SYNC_FAILED[@]}"; do
+        echo -e "${TAB}  ${CROSS} ${TARGET}"
+    done
+fi
+
 echo ""
 echo -e "${TAB}${BL}Pi-hole Dashboards:${CL}"
 echo -e "${TAB}  Primary:  ${GN}http://${PRIMARY_IP}/admin${CL}"
-echo -e "${TAB}  Backup:   ${GN}http://${BACKUP_PIHOLE}/admin${CL}"
+for TARGET in ${BACKUP_PIHOLES}; do
+    echo -e "${TAB}  Backup:   ${GN}http://${TARGET}/admin${CL}"
+done
 echo ""
 
 cleanup
