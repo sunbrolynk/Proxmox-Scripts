@@ -250,6 +250,8 @@ chmod +x /usr/local/bin/pihole-sync
 ```bash
 sudo pihole-sync                     # Interactive sync with confirmation
 sudo pihole-sync -y                  # Sync without prompts (for cron)
+sudo pihole-sync --skip-settings     # Sync but keep backup's passwords/network config
+sudo pihole-sync --diff              # Show what differs without syncing
 sudo pihole-sync --backup-only       # Local backup only, no sync
 sudo pihole-sync --list              # List stored backups
 sudo pihole-sync -h                  # Show help
@@ -261,9 +263,10 @@ sudo pihole-sync -V                  # Show version
 Edit the variables at the top of the script:
 
 ```bash
-BACKUP_PIHOLE="192.168.1.2"           # IP of the backup Pi-hole
-BACKUP_SSH_USER="root"                # SSH user on the backup Pi-hole
-BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole
+BACKUP_PIHOLES="192.168.1.2"          # Backup Pi-hole IP(s), space-separated for multiple
+                                      # Example: "192.168.1.2 192.168.1.3 192.168.1.4"
+BACKUP_SSH_USER="root"                # SSH user on the backup Pi-hole(s)
+BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole(s)
 LOCAL_BACKUP_DIR="/var/backups/pihole" # Where to store Teleporter archives locally
 RETENTION_COUNT=7                     # Number of local backups to keep
 ```
