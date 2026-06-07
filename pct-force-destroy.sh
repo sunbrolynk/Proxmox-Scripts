@@ -179,11 +179,47 @@ done
 
 # Validate: need either CTID or --all
 if [[ -z "$CTID" ]] && [[ "$CLEAR_ALL" == false ]]; then
-    msg_error "No container ID specified"
-    echo -e "${TAB}  Usage: ${BL}${SCRIPT_NAME} <CTID>${CL}"
-    echo -e "${TAB}  Or:    ${BL}${SCRIPT_NAME} --all${CL}"
-    echo -e "${TAB}  Help:  ${BL}${SCRIPT_NAME} -h${CL}"
-    exit 1
+    header_info
+    echo -e "${TAB}${BL}What would you like to do?${CL}"
+    echo ""
+    echo -e "${TAB}  ${GN}1)${CL} Force destroy a specific container"
+    echo -e "${TAB}  ${GN}2)${CL} Clear all stale locks (no destroy)"
+    echo -e "${TAB}  ${GN}3)${CL} Dry run — preview locks for a container"
+    echo -e "${TAB}  ${GN}4)${CL} Dry run — preview all stale locks"
+    echo -e "${TAB}  ${RD}q)${CL} Quit"
+    echo ""
+    read -rp "  Select an option [1-4/q]: " choice
+
+    case "$choice" in
+        1)
+            read -rp "  Enter container ID: " CTID
+            if [[ -z "$CTID" ]] || ! [[ "$CTID" =~ ^[0-9]+$ ]]; then
+                msg_error "Invalid container ID"
+                exit 1
+            fi
+            ;;
+        2) CLEAR_ALL=true ;;
+        3)
+            DRY_RUN=true
+            read -rp "  Enter container ID: " CTID
+            if [[ -z "$CTID" ]] || ! [[ "$CTID" =~ ^[0-9]+$ ]]; then
+                msg_error "Invalid container ID"
+                exit 1
+            fi
+            ;;
+        4) DRY_RUN=true; CLEAR_ALL=true ;;
+        q|Q)
+            echo ""
+            msg_ok "Exiting. No changes made."
+            echo ""
+            exit 0
+            ;;
+        *)
+            msg_error "Invalid option"
+            exit 1
+            ;;
+    esac
+    echo ""
 fi
 
 # ============================================================
