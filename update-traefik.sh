@@ -851,9 +851,11 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}2)${CL} Update Traefik binary only"
     echo -e "${TAB}  ${GN}3)${CL} Update Traefik Manager only"
     echo -e "${TAB}  ${GN}4)${CL} Update Traefik to a specific version"
+    echo -e "${TAB}  ${GN}5)${CL} Check status only (no changes)"
+    echo -e "${TAB}  ${GN}6)${CL} Rollback Traefik to previous version"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-4/q]: " choice
+    read -rp "  Select an option [1-6/q]: " choice
 
     case "$choice" in
         1) ;;
@@ -866,6 +868,13 @@ if [[ "$INTERACTIVE" == true ]]; then
                 exit 1
             fi
             ;;
+        5)
+            echo ""
+            msg_ok "Check complete. No changes made."
+            echo ""
+            exit 0
+            ;;
+        6) rollback_traefik ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
