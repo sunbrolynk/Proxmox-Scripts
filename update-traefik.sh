@@ -112,6 +112,12 @@ ${TAB}${TAB}Update Traefik binary only, skip Traefik Manager.
 ${TAB}${GN}--manager-only${CL}
 ${TAB}${TAB}Update Traefik Manager only, skip Traefik binary.
 
+${TAB}${GN}--check${CL}
+${TAB}${TAB}Show current vs latest versions and exit without updating.
+
+${TAB}${GN}--rollback${CL}
+${TAB}${TAB}Restore previous Traefik binary from backup (.bak file).
+
 ${TAB}${GN}-h, --help${CL}
 ${TAB}${TAB}Display this help and exit.
 
@@ -277,13 +283,20 @@ environment_checks() {
     KERNEL=$(uname -r)
     msg_ok "Kernel: ${GN}${KERNEL}${CL}"
 
-    # Architecture
+    # Architecture (auto-detect and adjust TRAEFIK_ARCH if needed)
     local ARCH
     ARCH=$(uname -m)
     if [[ "$ARCH" == "x86_64" ]]; then
-        msg_ok "Architecture: ${GN}${ARCH}${CL}"
+        TRAEFIK_ARCH="linux_amd64"
+        msg_ok "Architecture: ${GN}${ARCH} (${TRAEFIK_ARCH})${CL}"
+    elif [[ "$ARCH" == "aarch64" ]] || [[ "$ARCH" == "arm64" ]]; then
+        TRAEFIK_ARCH="linux_arm64"
+        msg_ok "Architecture: ${GN}${ARCH} (${TRAEFIK_ARCH})${CL}"
+    elif [[ "$ARCH" == "armv7l" ]]; then
+        TRAEFIK_ARCH="linux_armv7"
+        msg_ok "Architecture: ${GN}${ARCH} (${TRAEFIK_ARCH})${CL}"
     else
-        msg_warn "Architecture: ${ARCH} — Traefik binaries default to x86_64"
+        msg_warn "Architecture: ${ARCH} — using configured ${TRAEFIK_ARCH}"
         ENV_WARNINGS+=("arch")
     fi
 
@@ -514,6 +527,60 @@ preflight_checks() {
 # ============================================================
 # UPDATE FUNCTIONS
 # ============================================================
+
+rollback_traefik() {
+    echo ""
+    echo -e "${TAB}${BL}▸ Traefik Rollback${CL}"
+    echo ""
+
+    if [[ ! -f "${TRAEFIK_BIN}.bak" ]]; then
+        msg_error "No backup found at ${TRAEFIK_BIN}.bak"
+        echo -e "${TAB}  A backup is created automatically during updates."
+        exit 1
+    fi
+
+    local current_version backup_version
+    current_version=$(get_current_traefik_version)
+    backup_version=$("${TRAEFIK_BIN}.bak" version 2>/dev/null | grep "Version:" | awk '{print $2}' || echo "unknown")
+
+    echo -e "${TAB}  Current: ${YW}${current_version}${CL}"
+    echo -e "${TAB}  Backup:  ${GN}${backup_version}${CL}"
+    echo ""
+    read -rp "  Restore backup version? [y/N]: " confirm
+    if [[ "${confirm,,}" != "y" ]]; then
+        echo ""
+        msg_ok "Exiting. No changes made."
+        echo ""
+        exit 0
+    fi
+
+    echo ""
+    msg_info "Stopping ${TRAEFIK_SERVICE} service"
+    systemctl stop "${TRAEFIK_SERVICE}.service"
+    msg_ok "Stopped ${TRAEFIK_SERVICE}"
+
+    msg_info "Restoring backup"
+    cp "${TRAEFIK_BIN}.bak" "${TRAEFIK_BIN}"
+    chmod +x "${TRAEFIK_BIN}"
+    msg_ok "Restored ${TRAEFIK_BIN} from backup"
+
+    msg_info "Starting ${TRAEFIK_SERVICE} service"
+    systemctl start "${TRAEFIK_SERVICE}.service"
+    sleep 2
+
+    if systemctl is-active --quiet "${TRAEFIK_SERVICE}.service"; then
+        local restored_version
+        restored_version=$(get_current_traefik_version)
+        msg_ok "Traefik running — version ${GN}${restored_version}${CL}"
+    else
+        msg_error "Traefik failed to start after rollback!"
+        echo -e "${TAB}  Run: ${YW}sudo systemctl status ${TRAEFIK_SERVICE}${CL}"
+        exit 1
+    fi
+
+    echo ""
+    exit 0
+}
 
 update_traefik() {
     local target_version="$1"
@@ -749,15 +816,32 @@ SKIP_TRAEFIK=false
 SKIP_MANAGER=false
 SPECIFIC_VERSION=""
 INTERACTIVE=true
+CHECK_ONLY=false
+DO_ROLLBACK=false
 
 for arg in "${@:-}"; do
     case "${arg:-}" in
         --traefik-only) SKIP_MANAGER=true; INTERACTIVE=false ;;
         --manager-only) SKIP_TRAEFIK=true; INTERACTIVE=false ;;
         --yes|-y) INTERACTIVE=false ;;
+        --check) CHECK_ONLY=true ;;
+        --rollback) DO_ROLLBACK=true ;;
         v*) SPECIFIC_VERSION="$arg"; INTERACTIVE=false ;;
     esac
 done
+
+# --check: show status and exit
+if [[ "$CHECK_ONLY" == true ]]; then
+    echo ""
+    msg_ok "Check complete. No changes made."
+    echo ""
+    exit 0
+fi
+
+# --rollback: restore previous backup
+if [[ "$DO_ROLLBACK" == true ]]; then
+    rollback_traefik
+fi
 
 # Interactive menu
 if [[ "$INTERACTIVE" == true ]]; then
