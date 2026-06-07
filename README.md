@@ -204,6 +204,86 @@ This makes NFS operations timeout cleanly instead of hanging forever. See [Proxm
 
 ---
 
+<details>
+<summary><strong>pihole-sync</strong> — Sync Pi-hole config from primary to backup via Teleporter</summary>
+
+<br>
+
+Automates Pi-hole configuration sync from a primary instance to a backup using the built-in Teleporter CLI. Keeps both Pi-holes identical — blocklists, local DNS records, dnsmasq config, DHCP leases, groups, clients, and all settings. Designed for Pi-hole v6+.
+
+**Features:**
+- Full Teleporter export/import via CLI (no API tokens needed)
+- Preflight checks — verifies Pi-hole and SSH on both sides before syncing
+- Local backup archive with configurable retention (default: 7)
+- Backup-only mode for local archives without syncing
+- List stored backups with sizes and dates
+- Confirmation prompt before overwriting backup's config
+- CTRL+C safe — backup Pi-hole is not modified if cancelled
+- Automated mode (`-y`) for unattended cron execution
+
+**Prerequisites:**
+- Pi-hole v6+ on both primary and backup
+- SSH key-based authentication from primary → backup
+- Run on the **primary** Pi-hole
+
+**SSH key setup (one-time):**
+
+```bash
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+ssh-copy-id root@<backup-pihole-ip>
+```
+
+**Install (on the primary Pi-hole):**
+
+```bash
+wget -O /usr/local/bin/pihole-sync https://raw.githubusercontent.com/SunBroLynk/Proxmox-Scripts/main/pihole-sync.sh
+chmod +x /usr/local/bin/pihole-sync
+```
+
+**Usage:**
+
+```bash
+sudo pihole-sync                     # Interactive sync with confirmation
+sudo pihole-sync -y                  # Sync without prompts (for cron)
+sudo pihole-sync --backup-only       # Local backup only, no sync
+sudo pihole-sync --list              # List stored backups
+sudo pihole-sync -h                  # Show help
+sudo pihole-sync -V                  # Show version
+```
+
+**Configuration:**
+
+Edit the variables at the top of the script:
+
+```bash
+BACKUP_PIHOLE="192.168.1.2"           # IP of the backup Pi-hole
+BACKUP_SSH_USER="root"                # SSH user on the backup Pi-hole
+BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole
+LOCAL_BACKUP_DIR="/var/backups/pihole" # Where to store Teleporter archives locally
+RETENTION_COUNT=7                     # Number of local backups to keep
+```
+
+**Automated daily sync (cron):**
+
+```bash
+sudo crontab -e
+# Add this line:
+0 3 * * * /usr/local/bin/pihole-sync -y >> /var/log/pihole-sync.log 2>&1
+```
+
+**What it syncs:**
+- Blocklists (adlists) and group assignments
+- Local DNS records and CNAME records
+- Custom dnsmasq configuration (misc.dnsmasq_lines)
+- Domain allow/deny lists (including regex)
+- Client definitions and group memberships
+- DHCP leases
+- Pi-hole settings (pihole.toml)
+
+</details>
+
+---
+
 ## Contributing
 
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
