@@ -39,14 +39,19 @@
 - [x] Automated mode (-y) for cron
 - [x] CTRL+C safe
 - [x] Man-style help with dynamic config line numbers
-- [ ] Support for multiple backup targets (sync to 2+ Pi-holes)
-- [ ] Selective sync (blocklists only, DNS only, etc.)
-- [ ] Diff display before import (show what would change)
+- [x] Support for multiple backup targets (sync to 2+ Pi-holes)
+- [x] Selective sync (--skip-settings preserves backup's unique config)
+- [x] Diff display (--diff compares adlists, domains, clients, groups)
 
 ## Planned Scripts
 
 (none currently — add ideas here)
 
+## Ideas to Investigate
+
+- Proxmox VM template builder — automate creating base VM templates with common packages
+- SSL cert monitor — check all reverse proxy certs across multiple hosts, alert on expiry
+- Bulk snapshot cleanup — age-based cleanup across VMs and LXCs
 ## Ideas to Investigate
 
 - Proxmox VM template builder — automate creating base VM templates with common packages
