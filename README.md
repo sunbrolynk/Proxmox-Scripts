@@ -66,6 +66,8 @@ sudo update-traefik -y               # Update everything without prompts
 sudo update-traefik v3.7.0           # Update Traefik to a specific version
 sudo update-traefik --traefik-only   # Update Traefik binary only, skip Manager
 sudo update-traefik --manager-only   # Update Traefik Manager only, skip binary
+sudo update-traefik --check          # Show current vs latest versions, no changes
+sudo update-traefik --rollback       # Restore previous Traefik binary from backup
 sudo update-traefik -h               # Show help
 sudo update-traefik -V               # Show version
 ```
@@ -181,6 +183,9 @@ done
 
 ```bash
 sudo pct-force-destroy 105           # Force destroy container 105
+sudo pct-force-destroy --all         # Clear all stale locks (no destroy)
+sudo pct-force-destroy --dry-run 105 # Preview what would happen
+sudo pct-force-destroy --dry-run --all  # Preview all stale locks
 sudo pct-force-destroy -h            # Show help
 ```
 
