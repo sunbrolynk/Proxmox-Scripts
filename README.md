@@ -68,6 +68,8 @@ sudo update-traefik --traefik-only   # Update Traefik binary only, skip Manager
 sudo update-traefik --manager-only   # Update Traefik Manager only, skip binary
 sudo update-traefik --check          # Show current vs latest versions, no changes
 sudo update-traefik --rollback       # Restore previous Traefik binary from backup
+sudo update-traefik --changelog      # Show release notes for latest version
+sudo update-traefik --changelog v3.7.0  # Show release notes for specific version
 sudo update-traefik -h               # Show help
 sudo update-traefik -V               # Show version
 ```

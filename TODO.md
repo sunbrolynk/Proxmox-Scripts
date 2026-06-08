@@ -17,7 +17,7 @@
 - [x] `--check` flag to show status without updating
 - [x] `--rollback` flag to restore previous backup manually
 - [x] Support for ARM64 architecture detection and binary selection
-- [ ] Add changelog display (show what changed between versions)
+- [x] Add changelog display (show what changed between versions)
 
 ### pct-force-destroy.sh
 - [x] Validates container exists and is stopped
@@ -47,11 +47,6 @@
 
 (none currently — add ideas here)
 
-## Ideas to Investigate
-
-- Proxmox VM template builder — automate creating base VM templates with common packages
-- SSL cert monitor — check all reverse proxy certs across multiple hosts, alert on expiry
-- Bulk snapshot cleanup — age-based cleanup across VMs and LXCs
 ## Ideas to Investigate
 
 - Proxmox VM template builder — automate creating base VM templates with common packages

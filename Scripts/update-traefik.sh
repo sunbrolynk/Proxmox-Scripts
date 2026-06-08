@@ -118,6 +118,9 @@ ${TAB}${TAB}Show current vs latest versions and exit without updating.
 ${TAB}${GN}--rollback${CL}
 ${TAB}${TAB}Restore previous Traefik binary from backup (.bak file).
 
+${TAB}${GN}--changelog${CL}
+${TAB}${TAB}Show release notes for the latest (or specified) version.
+
 ${TAB}${GN}-h, --help${CL}
 ${TAB}${TAB}Display this help and exit.
 
@@ -528,6 +531,109 @@ preflight_checks() {
 # UPDATE FUNCTIONS
 # ============================================================
 
+show_changelog() {
+    local VERSION="${1:-}"
+
+    echo ""
+    echo -e "${TAB}${BL}▸ Traefik Changelog${CL}"
+    echo ""
+
+    # Determine which version to show
+    if [[ -z "$VERSION" ]]; then
+        VERSION=$(get_latest_traefik_version)
+    fi
+    local VERSION_CLEAN=$(echo "$VERSION" | sed 's/^v//')
+    VERSION="v${VERSION_CLEAN}"
+
+    msg_info "Fetching release notes for ${VERSION}"
+
+    local RELEASE_JSON
+    RELEASE_JSON=$(curl -s "https://api.github.com/repos/traefik/traefik/releases/tags/${VERSION}" 2>/dev/null)
+
+    if echo "$RELEASE_JSON" | grep -q '"message": "Not Found"'; then
+        msg_error "Release ${VERSION} not found"
+        echo -e "${TAB}  Check: ${BL}https://github.com/traefik/traefik/releases${CL}"
+        return 1
+    fi
+
+    # Extract release info
+    local RELEASE_NAME RELEASE_DATE RELEASE_URL RELEASE_BODY
+    RELEASE_NAME=$(echo "$RELEASE_JSON" | grep '"name"' | head -1 | sed -E 's/.*"name": *"([^"]+)".*/\1/')
+    RELEASE_DATE=$(echo "$RELEASE_JSON" | grep '"published_at"' | head -1 | sed -E 's/.*"published_at": *"([^T]+)T.*/\1/')
+    RELEASE_URL=$(echo "$RELEASE_JSON" | grep '"html_url"' | head -1 | sed -E 's/.*"html_url": *"([^"]+)".*/\1/')
+
+    msg_ok "Release: ${GN}${RELEASE_NAME}${CL} (${RELEASE_DATE})"
+    echo ""
+
+    # Try to extract and display the body using Python (available on most systems)
+    if command -v python3 &>/dev/null; then
+        RELEASE_BODY=$(echo "$RELEASE_JSON" | python3 -c "
+import json, sys, re
+try:
+    d = json.load(sys.stdin)
+    body = d.get('body', '')
+    if body:
+        # Strip markdown links [text](url) -> text
+        body = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', body)
+        # Strip bold **text** -> text
+        body = re.sub(r'\*\*([^\*]+)\*\*', r'\1', body)
+        # Strip HTML tags
+        body = re.sub(r'<[^>]+>', '', body)
+        # Limit to first 30 lines
+        lines = body.strip().split('\n')[:30]
+        print('\n'.join(lines))
+        if len(body.strip().split('\n')) > 30:
+            print('... (truncated, see full notes at URL below)')
+    else:
+        print('No release notes available.')
+except:
+    print('Could not parse release notes.')
+" 2>/dev/null)
+    else
+        RELEASE_BODY="(Install python3 for formatted release notes)"
+    fi
+
+    # Display with indentation
+    while IFS= read -r line; do
+        echo -e "${TAB}  ${line}"
+    done <<< "$RELEASE_BODY"
+
+    echo ""
+    echo -e "${TAB}  ${BL}Full release notes: ${RELEASE_URL}${CL}"
+    echo ""
+
+    # Manager changelog
+    if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
+        echo -e "${TAB}${BL}▸ Traefik Manager Changelog${CL}"
+        echo ""
+
+        cd "${TRAEFIK_MANAGER_DIR}"
+        sudo -u "${TRAEFIK_MANAGER_USER}" git fetch origin main --quiet 2>/dev/null
+
+        local LOCAL_HASH REMOTE_HASH
+        LOCAL_HASH=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse HEAD 2>/dev/null)
+        REMOTE_HASH=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse origin/main 2>/dev/null)
+
+        if [[ "$LOCAL_HASH" == "$REMOTE_HASH" ]]; then
+            msg_ok "Manager is up to date — no new changes"
+        else
+            local COMMIT_COUNT
+            COMMIT_COUNT=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+            msg_ok "${COMMIT_COUNT} new commit(s) available:"
+            echo ""
+            sudo -u "${TRAEFIK_MANAGER_USER}" git log --oneline HEAD..origin/main 2>/dev/null | head -15 | while IFS= read -r line; do
+                echo -e "${TAB}  ${YW}•${CL} ${line}"
+            done
+            if [[ "$COMMIT_COUNT" -gt 15 ]] 2>/dev/null; then
+                echo -e "${TAB}  ${YW}... and $((COMMIT_COUNT - 15)) more${CL}"
+            fi
+        fi
+        echo ""
+        echo -e "${TAB}  ${BL}Full history: https://github.com/${TRAEFIK_MANAGER_REPO}/commits/main${CL}"
+        echo ""
+    fi
+}
+
 rollback_traefik() {
     echo ""
     echo -e "${TAB}${BL}▸ Traefik Rollback${CL}"
@@ -818,6 +924,7 @@ SPECIFIC_VERSION=""
 INTERACTIVE=true
 CHECK_ONLY=false
 DO_ROLLBACK=false
+SHOW_CHANGELOG=false
 
 for arg in "${@:-}"; do
     case "${arg:-}" in
@@ -826,6 +933,7 @@ for arg in "${@:-}"; do
         --yes|-y) INTERACTIVE=false ;;
         --check) CHECK_ONLY=true ;;
         --rollback) DO_ROLLBACK=true ;;
+        --changelog) SHOW_CHANGELOG=true ;;
         v*) SPECIFIC_VERSION="$arg"; INTERACTIVE=false ;;
     esac
 done
@@ -843,6 +951,12 @@ if [[ "$DO_ROLLBACK" == true ]]; then
     rollback_traefik
 fi
 
+# --changelog: show release notes and exit
+if [[ "$SHOW_CHANGELOG" == true ]]; then
+    show_changelog "$SPECIFIC_VERSION"
+    exit 0
+fi
+
 # Interactive menu
 if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}${BL}What would you like to do?${CL}"
@@ -853,9 +967,10 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}4)${CL} Update Traefik to a specific version"
     echo -e "${TAB}  ${GN}5)${CL} Check status only (no changes)"
     echo -e "${TAB}  ${GN}6)${CL} Rollback Traefik to previous version"
+    echo -e "${TAB}  ${GN}7)${CL} View changelog (release notes)"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-6/q]: " choice
+    read -rp "  Select an option [1-7/q]: " choice
 
     case "$choice" in
         1) ;;
@@ -875,6 +990,7 @@ if [[ "$INTERACTIVE" == true ]]; then
             exit 0
             ;;
         6) rollback_traefik ;;
+        7) show_changelog; exit 0 ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
