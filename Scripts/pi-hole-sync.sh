@@ -466,7 +466,13 @@ restore_backup() {
         done < <(ls -1t "${LOCAL_BACKUP_DIR}"/pi-hole_*teleporter*.zip)
 
         echo ""
-        read -rp "  Select backup to restore [1-${COUNT}]: " selection
+        read -rp "  Select backup to restore [1-${COUNT}/q]: " selection
+        if [[ "${selection,,}" == "q" ]]; then
+            echo ""
+            msg_ok "Exiting. No changes made."
+            echo ""
+            exit 0
+        fi
         if ! [[ "$selection" =~ ^[0-9]+$ ]] || [[ "$selection" -lt 1 ]] || [[ "$selection" -gt "$COUNT" ]]; then
             msg_error "Invalid selection"
             exit 1
