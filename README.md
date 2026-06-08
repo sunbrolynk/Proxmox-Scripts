@@ -99,52 +99,6 @@ MIN_PYTHON="3.9"                            # Minimum Python version for Manager
 - Traefik installed as a systemd service
 - Traefik Manager (optional) installed via git clone with a Python virtualenv
 
-<details>
-<summary><strong>How it works</strong> (flow diagram)</summary>
-
-```
-┌─────────────────────────────────┐
-│         Header & Root Check     │
-├─────────────────────────────────┤
-│      Internet Connectivity      │
-├─────────────────────────────────┤
-│    Environment Checks           │
-│    ├── OS version               │
-│    ├── Kernel & architecture    │
-│    ├── Platform (VM/LXC)        │
-│    ├── Python version           │
-│    ├── Disk space               │
-│    └── Available memory         │
-├─────────────────────────────────┤
-│    Preflight Checks             │
-│    ├── Required packages        │
-│    ├── Traefik binary           │
-│    ├── Service status           │
-│    └── Traefik Manager (opt.)   │
-├─────────────────────────────────┤
-│    Version Status               │
-│    ├── Current vs Latest        │
-│    └── Manager commit status    │
-├─────────────────────────────────┤
-│    Interactive Menu              │
-│    ├── 1) Update everything     │
-│    ├── 2) Traefik only          │
-│    ├── 3) Manager only          │
-│    ├── 4) Specific version      │
-│    └── q) Quit                  │
-├─────────────────────────────────┤
-│    Update Process               │
-│    ├── Download new version     │
-│    ├── Backup current binary    │
-│    ├── Stop → Install → Start   │
-│    └── Rollback on failure      │
-├─────────────────────────────────┤
-│    Summary & Dashboard URLs     │
-└─────────────────────────────────┘
-```
-
-</details>
-
 </details>
 
 ---
@@ -292,6 +246,75 @@ sudo crontab -e
 - Client definitions and group memberships
 - DHCP leases
 - Pi-hole settings (pihole.toml)
+
+</details>
+
+---
+
+<details>
+<summary><strong>nfs-watchdog</strong> — Monitor NFS mount health across Proxmox cluster nodes</summary>
+
+<br>
+
+Detects stale or unresponsive NFS mounts before they cause cascading lock issues and container deletion failures. Tests read, write, and latency on every NFS mount.
+
+**Features:**
+- Auto-detects all NFS mounts on the node
+- Timed stat and write tests with configurable timeout
+- Latency measurement with color-coded thresholds (green/yellow/red)
+- Detects stale mounts before they cause problems
+- Optional auto-remount of stale mounts
+- Force remount all mounts on demand
+- Mount options display (detects hard vs soft)
+- Gotify notifications for stale mount alerts
+- CTRL+C safe
+- Designed to run as a cron job on every cluster node
+
+**Install:**
+
+```bash
+wget -O /usr/local/bin/nfs-watchdog https://raw.githubusercontent.com/SunBroLynk/Proxmox-Scripts/main/nfs-watchdog.sh
+chmod +x /usr/local/bin/nfs-watchdog
+```
+
+For clusters, deploy to all nodes:
+
+```bash
+for node in node1-ip node2-ip node3-ip; do
+    scp /usr/local/bin/nfs-watchdog root@${node}:/usr/local/bin/
+done
+```
+
+**Usage:**
+
+```bash
+sudo nfs-watchdog                    # Interactive mode — guided menu
+sudo nfs-watchdog -y                 # Run checks without prompts (for cron)
+sudo nfs-watchdog --status           # Detailed status of all NFS mounts
+sudo nfs-watchdog --dry-run          # Check only, no remount or notify
+sudo nfs-watchdog --remount          # Force remount all NFS mounts
+sudo nfs-watchdog --test-notify      # Test Gotify notification
+sudo nfs-watchdog -h                 # Show help
+```
+
+**Configuration:**
+
+```bash
+CHECK_TIMEOUT=5                       # Seconds before declaring a mount stale
+AUTO_REMOUNT=false                    # Auto-remount stale mounts (true/false)
+LOG_FILE="/var/log/nfs-watchdog.log"  # Log file for cron mode
+GOTIFY_URL=""                         # Gotify server URL
+GOTIFY_TOKEN=""                       # Gotify application token
+GOTIFY_PRIORITY=5                     # Notification priority (1-10)
+```
+
+**Automated cron check (every 5 minutes):**
+
+```bash
+sudo crontab -e
+# Add this line:
+*/5 * * * * /usr/local/bin/nfs-watchdog -y >> /var/log/nfs-watchdog.log 2>&1
+```
 
 </details>
 
