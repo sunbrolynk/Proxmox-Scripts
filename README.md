@@ -63,6 +63,7 @@ chmod +x /usr/local/bin/update-traefik
 ```bash
 sudo update-traefik                  # Interactive mode — guided menu
 sudo update-traefik -y               # Update everything without prompts
+sudo update-traefik --cron           # Automated update with Gotify notification
 sudo update-traefik v3.7.0           # Update Traefik to a specific version
 sudo update-traefik --traefik-only   # Update Traefik binary only, skip Manager
 sudo update-traefik --manager-only   # Update Traefik Manager only, skip binary
@@ -70,6 +71,8 @@ sudo update-traefik --check          # Show current vs latest versions, no chang
 sudo update-traefik --rollback       # Restore previous Traefik binary from backup
 sudo update-traefik --changelog      # Show release notes for latest version
 sudo update-traefik --changelog v3.7.0  # Show release notes for specific version
+sudo update-traefik --test-notify    # Test Gotify notification
+sudo update-traefik --schedule       # Set up, change, or remove cron schedule
 sudo update-traefik -h               # Show help
 sudo update-traefik -V               # Show version
 ```
