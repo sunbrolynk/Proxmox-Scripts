@@ -63,18 +63,21 @@
 ### nfs-watchdog.sh
 Monitors NFS mount health across Proxmox cluster nodes. Detects stale or unresponsive mounts before they cause cascading lock issues.
 
-- [ ] Lightweight read/write test on each NFS mount
-- [ ] Configurable check interval and timeout threshold
-- [ ] Auto-detect NFS mounts from /etc/pve/storage.cfg
-- [ ] Stale mount detection (touch/stat test with timeout)
-- [ ] Auto-remount option for stale mounts
-- [ ] Alert via Gotify when a mount is unhealthy
-- [ ] `--test-notify` flag to test Gotify integration
-- [ ] `--status` flag to show all NFS mounts and their health
-- [ ] `--dry-run` flag to show what would be checked without acting
-- [ ] Designed to run as a cron job on every cluster node
-- [ ] Log output for cron mode
-- [ ] Man-style help and interactive menu
+- [x] Lightweight read/write test on each NFS mount
+- [x] Configurable check interval and timeout threshold
+- [x] Auto-detect NFS mounts from /proc/mounts
+- [x] Stale mount detection (stat/touch test with timeout)
+- [x] Auto-remount option for stale mounts
+- [x] Alert via Gotify when a mount is unhealthy
+- [x] `--test-notify` flag to test Gotify integration
+- [x] `--status` flag to show all NFS mounts and their health
+- [x] `--dry-run` flag to show what would be checked without acting
+- [x] `--remount` flag to force remount all NFS mounts
+- [x] Designed to run as a cron job on every cluster node
+- [x] Log output for cron mode
+- [x] Man-style help and interactive menu
+- [x] Latency measurement with color-coded thresholds
+- [x] Mount options display (hard vs soft detection)
 
 ### cert-monitor.sh
 Checks SSL certificate expiry dates across reverse proxy configurations. Catches renewal failures before users notice.
