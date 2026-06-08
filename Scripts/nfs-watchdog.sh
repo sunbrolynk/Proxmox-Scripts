@@ -258,10 +258,19 @@ send_gotify() {
         return 0
     fi
 
+    # Send with markdown support
     curl -s -X POST "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
-        -F "title=${title}" \
-        -F "message=${message}" \
-        -F "priority=${priority}" &>/dev/null || true
+        -H "Content-Type: application/json" \
+        -d "{
+            \"title\": \"${title}\",
+            \"message\": $(echo "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "\"${message}\""),
+            \"priority\": ${priority},
+            \"extras\": {
+                \"client::display\": {
+                    \"contentType\": \"text/markdown\"
+                }
+            }
+        }" &>/dev/null || true
 }
 
 test_gotify() {
@@ -285,12 +294,30 @@ test_gotify() {
 
     msg_info "Sending test notification to ${GOTIFY_URL}"
 
+    local test_message="### ✅ Connection Successful
+
+**Script:** \`${SCRIPT_NAME}\`
+**Node:** \`$(hostname)\`
+**Time:** $(date '+%Y-%m-%d %H:%M:%S')
+
+---
+
+*NFS Watchdog is configured and ready to send alerts.*"
+
     local response
     response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
         "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
-        -F "title=NFS Watchdog Test" \
-        -F "message=Test notification from ${SCRIPT_NAME} on $(hostname) at $(date)" \
-        -F "priority=${GOTIFY_PRIORITY}" 2>/dev/null)
+        -H "Content-Type: application/json" \
+        -d "{
+            \"title\": \"🐕 NFS Watchdog — Test\",
+            \"message\": $(echo "$test_message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null),
+            \"priority\": ${GOTIFY_PRIORITY},
+            \"extras\": {
+                \"client::display\": {
+                    \"contentType\": \"text/markdown\"
+                }
+            }
+        }" 2>/dev/null)
 
     if [[ "$response" == "200" ]]; then
         msg_ok "Test notification sent successfully"
@@ -476,11 +503,39 @@ run_checks() {
 
     # Send Gotify alert if stale mounts found (not in dry run)
     if [[ ${#STALE_MOUNTS[@]} -gt 0 ]] && [[ "$DRY_RUN_MODE" != true ]]; then
-        local stale_list
-        stale_list=$(printf '%s\n' "${STALE_MOUNTS[@]}")
-        send_gotify \
-            "⚠️ NFS Watchdog — $(hostname)" \
-            "Stale NFS mount(s) detected on $(hostname):\n${stale_list}\n\nAuto-remount: ${AUTO_REMOUNT}\nTimestamp: $(date)"
+        local stale_rows healthy_rows node_ip
+        node_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        stale_rows=""
+        for m in "${STALE_MOUNTS[@]}"; do
+            stale_rows="${stale_rows}| \`${m}\` | 🔴 **STALE** |\n"
+        done
+        healthy_rows=""
+        for m in "${HEALTHY_MOUNTS[@]}"; do
+            healthy_rows="${healthy_rows}| \`${m}\` | 🟢 Healthy |\n"
+        done
+
+        local alert_message="### 🔴 Stale NFS Mount Detected
+
+**Node:** \`$(hostname)\` (${node_ip})
+**Time:** $(date '+%Y-%m-%d %H:%M:%S')
+**Timeout:** ${CHECK_TIMEOUT}s
+
+| Mount | Status |
+|-------|--------|
+${stale_rows}${healthy_rows}
+**Auto-remount:** ${AUTO_REMOUNT}"
+
+        if [[ ${#REMOUNTED_MOUNTS[@]} -gt 0 ]]; then
+            alert_message="${alert_message}
+**Remounted:** ${#REMOUNTED_MOUNTS[@]} mount(s) recovered"
+        fi
+
+        if [[ ${#FAILED_REMOUNTS[@]} -gt 0 ]]; then
+            alert_message="${alert_message}
+**⚠️ Failed remounts:** ${#FAILED_REMOUNTS[@]} — manual intervention needed"
+        fi
+
+        send_gotify "🐕 NFS Watchdog — $(hostname)" "$alert_message" 8
 
         if [[ -n "$GOTIFY_URL" ]] && [[ -n "$GOTIFY_TOKEN" ]]; then
             msg_ok "Gotify alert sent"
