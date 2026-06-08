@@ -20,6 +20,10 @@ TRAEFIK_ARCH="linux_amd64"
 MIN_DISK_MB=500
 MIN_MEM_MB=256
 MIN_PYTHON="3.9"
+GOTIFY_URL=""                         # Gotify server URL (e.g. http://10.10.3.6:80)
+GOTIFY_TOKEN=""                       # Gotify application token
+GOTIFY_PRIORITY=5                     # Gotify notification priority (1-10)
+LOG_FILE="/var/log/update-traefik.log"  # Log file for cron mode
 # ============================================================
 
 set -euo pipefail
@@ -121,6 +125,16 @@ ${TAB}${TAB}Restore previous Traefik binary from backup (.bak file).
 ${TAB}${GN}--changelog${CL}
 ${TAB}${TAB}Show release notes for the latest (or specified) version.
 
+${TAB}${GN}--cron${CL}
+${TAB}${TAB}Automated mode for scheduled runs. Updates all components
+${TAB}${TAB}without prompts and sends a Gotify notification with results.
+
+${TAB}${GN}--test-notify${CL}
+${TAB}${TAB}Send a test notification to Gotify.
+
+${TAB}${GN}--schedule${CL}
+${TAB}${TAB}Set up, change, or remove the cron schedule.
+
 ${TAB}${GN}-h, --help${CL}
 ${TAB}${TAB}Display this help and exit.
 
@@ -200,6 +214,171 @@ msg_error() {
 msg_warn() {
     local msg="$1"
     echo -e "${BFR}${TAB}${INFO} ${YW}${msg}${CL}"
+}
+
+send_gotify() {
+    local title="$1"
+    local message="$2"
+    local priority="${3:-$GOTIFY_PRIORITY}"
+
+    if [[ -z "$GOTIFY_URL" ]] || [[ -z "$GOTIFY_TOKEN" ]]; then
+        return 0
+    fi
+
+    curl -s -X POST "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"title\": \"${title}\",
+            \"message\": $(echo "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "\"${message}\""),
+            \"priority\": ${priority},
+            \"extras\": {
+                \"client::display\": {
+                    \"contentType\": \"text/markdown\"
+                }
+            }
+        }" &>/dev/null || true
+}
+
+test_gotify() {
+    header_info
+    echo -e "${TAB}${BD}Gotify Notification Test${CL}"
+    echo ""
+
+    if [[ -z "$GOTIFY_URL" ]]; then
+        msg_error "GOTIFY_URL not configured"
+        echo -e "${TAB}  Edit the script and set GOTIFY_URL and GOTIFY_TOKEN"
+        echo ""
+        exit 1
+    fi
+    if [[ -z "$GOTIFY_TOKEN" ]]; then
+        msg_error "GOTIFY_TOKEN not configured"
+        echo ""
+        exit 1
+    fi
+
+    local test_message="### ✅ Connection Successful
+
+**Script:** \`${SCRIPT_NAME}\`
+**Host:** \`$(hostname)\`
+**Time:** $(date '+%Y-%m-%d %H:%M:%S')
+
+---
+
+*Traefik updater is configured and ready to send alerts.*"
+
+    msg_info "Sending test notification to ${GOTIFY_URL}"
+    local response
+    response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+        "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"title\": \"🔄 Traefik Updater — Test\",
+            \"message\": $(echo "$test_message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null),
+            \"priority\": ${GOTIFY_PRIORITY},
+            \"extras\": {
+                \"client::display\": {
+                    \"contentType\": \"text/markdown\"
+                }
+            }
+        }" 2>/dev/null)
+
+    if [[ "$response" == "200" ]]; then
+        msg_ok "Test notification sent successfully"
+    else
+        msg_error "Notification failed (HTTP ${response})"
+    fi
+    echo ""
+    exit 0
+}
+
+manage_cron() {
+    header_info
+    echo -e "${TAB}${BD}Schedule Manager${CL}"
+    echo ""
+
+    local CRON_CMD="/usr/local/bin/${SCRIPT_NAME} --cron >> ${LOG_FILE} 2>&1"
+    local CURRENT_CRON
+    CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
+
+    if [[ -n "$CURRENT_CRON" ]]; then
+        echo -e "${TAB}  ${GN}Current schedule:${CL}"
+        echo -e "${TAB}  ${BL}${CURRENT_CRON}${CL}"
+        echo ""
+        echo -e "${TAB}  ${GN}1)${CL} Change schedule"
+        echo -e "${TAB}  ${GN}2)${CL} Remove schedule"
+        echo -e "${TAB}  ${RD}q)${CL} Back"
+        echo ""
+        read -rp "  Select [1-2/q]: " cron_choice
+        case "$cron_choice" in
+            1) ;;
+            2)
+                crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" | crontab -
+                echo ""
+                msg_ok "Schedule removed"
+                echo ""
+                exit 0
+                ;;
+            *)
+                echo ""
+                exit 0
+                ;;
+        esac
+        echo ""
+    else
+        echo -e "${TAB}  ${YW}No schedule configured${CL}"
+        echo ""
+    fi
+
+    echo -e "${TAB}  ${BD}How often should ${SCRIPT_NAME} check for updates?${CL}"
+    echo ""
+    echo -e "${TAB}  ${GN}1)${CL} Daily at 3:00 AM (recommended)"
+    echo -e "${TAB}  ${GN}2)${CL} Daily at custom time"
+    echo -e "${TAB}  ${GN}3)${CL} Every 12 hours"
+    echo -e "${TAB}  ${GN}4)${CL} Weekly (Sunday at 3:00 AM)"
+    echo -e "${TAB}  ${GN}5)${CL} Custom cron expression"
+    echo -e "${TAB}  ${RD}q)${CL} Cancel"
+    echo ""
+    read -rp "  Select [1-5/q]: " schedule_choice
+
+    local CRON_SCHEDULE=""
+    case "$schedule_choice" in
+        1) CRON_SCHEDULE="0 3 * * *" ;;
+        2)
+            read -rp "  Hour (0-23): " cron_hour
+            read -rp "  Minute (0-59): " cron_min
+            if ! [[ "$cron_hour" =~ ^[0-9]+$ ]] || [[ "$cron_hour" -gt 23 ]]; then
+                msg_error "Invalid hour"
+                exit 1
+            fi
+            if ! [[ "$cron_min" =~ ^[0-9]+$ ]] || [[ "$cron_min" -gt 59 ]]; then
+                msg_error "Invalid minute"
+                exit 1
+            fi
+            CRON_SCHEDULE="${cron_min} ${cron_hour} * * *"
+            ;;
+        3) CRON_SCHEDULE="0 */12 * * *" ;;
+        4) CRON_SCHEDULE="0 3 * * 0" ;;
+        5)
+            read -rp "  Cron expression (e.g. 0 3 * * *): " CRON_SCHEDULE
+            if [[ -z "$CRON_SCHEDULE" ]]; then
+                msg_error "No expression entered"
+                exit 1
+            fi
+            ;;
+        *)
+            echo ""
+            exit 0
+            ;;
+    esac
+
+    local NEW_CRON="${CRON_SCHEDULE} ${CRON_CMD}"
+    (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "$NEW_CRON") | crontab -
+
+    echo ""
+    msg_ok "Schedule set: ${GN}${CRON_SCHEDULE}${CL}"
+    echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+    echo ""
+    exit 0
 }
 
 check_root() {
@@ -882,6 +1061,8 @@ for arg in "${@:-}"; do
             echo "${SCRIPT_URL}"
             exit 0
             ;;
+        --test-notify) test_gotify ;;
+        --schedule) manage_cron ;;
     esac
 done
 
@@ -949,6 +1130,7 @@ INTERACTIVE=true
 CHECK_ONLY=false
 DO_ROLLBACK=false
 SHOW_CHANGELOG=false
+CRON_MODE=false
 
 for arg in "${@:-}"; do
     case "${arg:-}" in
@@ -958,6 +1140,7 @@ for arg in "${@:-}"; do
         --check) CHECK_ONLY=true ;;
         --rollback) DO_ROLLBACK=true ;;
         --changelog) SHOW_CHANGELOG=true ;;
+        --cron) CRON_MODE=true; INTERACTIVE=false ;;
         v*) SPECIFIC_VERSION="$arg"; INTERACTIVE=false ;;
     esac
 done
@@ -992,9 +1175,11 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}5)${CL} Check status only (no changes)"
     echo -e "${TAB}  ${GN}6)${CL} Rollback Traefik to previous version"
     echo -e "${TAB}  ${GN}7)${CL} View changelog (release notes)"
+    echo -e "${TAB}  ${GN}8)${CL} Test Gotify notification"
+    echo -e "${TAB}  ${GN}9)${CL} Manage cron schedule"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-7/q]: " choice
+    read -rp "  Select an option [1-9/q]: " choice
 
     case "$choice" in
         1) ;;
@@ -1015,6 +1200,8 @@ if [[ "$INTERACTIVE" == true ]]; then
             ;;
         6) rollback_traefik ;;
         7) show_changelog; exit 0 ;;
+        8) test_gotify ;;
+        9) manage_cron ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
@@ -1070,5 +1257,29 @@ if [[ -d "${TRAEFIK_MANAGER_DIR}" ]]; then
     echo -e "${TAB}  Manager:  ${GN}http://${VM_IP}:${TRAEFIK_MANAGER_PORT}${CL}"
 fi
 echo ""
+
+# Send Gotify notification (only in cron mode)
+if [[ "$CRON_MODE" == true ]]; then
+    manager_line=""
+    if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
+        manager_line="**Manager:** \`${FINAL_MANAGER}\`"
+    fi
+
+    notify_message="### 🟢 Update Complete
+
+**Host:** \`$(hostname)\` (${VM_IP})
+**Time:** $(date '+%Y-%m-%d %H:%M:%S')
+**Traefik:** \`${CURRENT_TRAEFIK}\` → \`${FINAL_TRAEFIK}\`
+${manager_line}
+
+| Dashboard | URL |
+|-----------|-----|
+| Traefik | http://${VM_IP}:${TRAEFIK_DASHBOARD_PORT}/dashboard/ |
+| Manager | http://${VM_IP}:${TRAEFIK_MANAGER_PORT} |
+
+*Automatic update via cron.*"
+
+    send_gotify "🔄 Traefik Update — $(hostname)" "$notify_message"
+fi
 
 cleanup
