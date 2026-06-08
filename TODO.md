@@ -19,7 +19,8 @@
 - [x] `--changelog` flag to show release notes
 - [x] Support for ARM64 architecture detection and binary selection
 - [x] Interactive menu with all options
-- [ ] SHA256 checksum verification of downloaded binary against GitHub release
+- [x] SHA256 checksum verification of downloaded binary against GitHub release
+- [ ] GPG signature verification against Traefik's signing key (full supply chain hardening)
 - [ ] `--cron` mode with file logging and Gotify notification on success/failure
 - [ ] `--test-notify` flag to test Gotify integration
 
@@ -33,8 +34,8 @@
 - [x] `--all` flag to clear all stale locks without specifying a CTID
 - [x] `--dry-run` flag to show what would be cleared without doing it
 - [x] Interactive menu when run with no args
-- [ ] `--status` flag to show all containers and their lock state on this node
-- [ ] Auto-detect storage backend type per container (NFS, local-lvm, ZFS)
+- [x] `--status` flag to show all containers and their lock state on this node
+- [x] Auto-detect storage backend type per container (NFS, local-lvm, ZFS)
 - [ ] Gotify notification when locks are force-cleared
 - [ ] `--test-notify` flag to test Gotify integration
 
@@ -52,8 +53,8 @@
 - [x] Selective sync (--skip-settings preserves backup's unique config)
 - [x] Diff display (--diff compares adlists, domains, clients, groups)
 - [x] Interactive menu with all options
-- [ ] `--restore <file>` mode to restore a specific backup to the primary
-- [ ] Trigger gravity update on backup after import (`pihole -g`)
+- [x] `--restore <file>` mode to restore a specific backup to the primary
+- [x] Trigger gravity update on backup after import (`pihole -g`)
 - [ ] Gotify notification on sync success/failure
 - [ ] `--test-notify` flag to test Gotify integration
 

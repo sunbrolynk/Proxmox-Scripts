@@ -708,6 +708,7 @@ update_traefik() {
 
     # Download
     local download_url="https://github.com/traefik/traefik/releases/download/${target_version}/traefik_${target_version}_${TRAEFIK_ARCH}.tar.gz"
+    local checksum_url="https://github.com/traefik/traefik/releases/download/${target_version}/traefik_${target_version}_checksums.txt"
     local tmp_file="/tmp/traefik_update_${target_version}.tar.gz"
     TEMP_FILES+=("$tmp_file")
 
@@ -718,6 +719,29 @@ update_traefik() {
         return 1
     fi
     msg_ok "Downloaded Traefik ${target_version}"
+
+    # Verify SHA256 checksum
+    msg_info "Verifying SHA256 checksum"
+    local checksum_file="/tmp/traefik_checksums_${target_version}.txt"
+    TEMP_FILES+=("$checksum_file")
+    if wget -q "${checksum_url}" -O "$checksum_file" 2>/dev/null; then
+        local expected_hash actual_hash archive_name
+        archive_name="traefik_${target_version}_${TRAEFIK_ARCH}.tar.gz"
+        expected_hash=$(grep "${archive_name}" "$checksum_file" | awk '{print $1}')
+        actual_hash=$(sha256sum "$tmp_file" | awk '{print $1}')
+        if [[ -n "$expected_hash" ]] && [[ "$expected_hash" == "$actual_hash" ]]; then
+            msg_ok "Checksum verified (SHA256)"
+        else
+            msg_error "Checksum mismatch! Download may be corrupted or tampered with"
+            echo -e "${TAB}  Expected: ${YW}${expected_hash}${CL}"
+            echo -e "${TAB}  Got:      ${RD}${actual_hash}${CL}"
+            rm -f "$tmp_file" "$checksum_file"
+            return 1
+        fi
+        rm -f "$checksum_file"
+    else
+        msg_warn "Checksum file not available — skipping verification"
+    fi
 
     # Backup
     msg_info "Backing up current binary"

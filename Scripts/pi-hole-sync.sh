@@ -106,6 +106,10 @@ show_help() {
     echo -e "${TAB}${TAB}Show what differs between primary and backup(s)"
     echo -e "${TAB}${TAB}without syncing. Compares adlists, domains, clients."
     echo ""
+    echo -e "${TAB}${GN}--restore [file]${CL}"
+    echo -e "${TAB}${TAB}Restore a Teleporter backup to the primary Pi-hole."
+    echo -e "${TAB}${TAB}If no file specified, shows a list to choose from."
+    echo ""
     echo -e "${TAB}${GN}--list${CL}"
     echo -e "${TAB}${TAB}List local Teleporter backups."
     echo ""
@@ -370,6 +374,19 @@ reload_backup_dns() {
     fi
 }
 
+update_gravity() {
+    local TARGET="$1"
+    msg_info "Updating gravity on ${TARGET} (this may take a moment)"
+
+    if ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+        "pihole -g" &>/dev/null; then
+        msg_ok "Gravity updated on ${TARGET}"
+    else
+        msg_warn "Gravity update returned non-zero on ${TARGET}"
+        echo -e "${TAB}  Run manually: ${BL}ssh ${BACKUP_SSH_USER}@${TARGET} 'pihole -g'${CL}"
+    fi
+}
+
 cleanup_remote() {
     local TARGET="$1"
     ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
@@ -415,6 +432,91 @@ list_backups() {
 
     echo ""
     echo -e "${TAB}Total: ${BD}${COUNT}${CL} backup(s), retention: ${BD}${RETENTION_COUNT}${CL}"
+    echo ""
+    exit 0
+}
+
+restore_backup() {
+    local RESTORE_FILE="${1:-}"
+
+    header_info
+    echo -e "${TAB}${BD}Restore Teleporter Backup to Primary${CL}"
+    echo ""
+
+    # If no file specified, show list and prompt
+    if [[ -z "$RESTORE_FILE" ]]; then
+        if [[ ! -d "${LOCAL_BACKUP_DIR}" ]] || [[ -z "$(ls "${LOCAL_BACKUP_DIR}"/pi-hole_*teleporter*.zip 2>/dev/null)" ]]; then
+            msg_error "No backups found in ${LOCAL_BACKUP_DIR}"
+            exit 1
+        fi
+
+        echo -e "${TAB}${BL}Available backups:${CL}"
+        echo ""
+        local FILES=()
+        local COUNT=0
+        while IFS= read -r file; do
+            COUNT=$((COUNT + 1))
+            FILES+=("$file")
+            local fname fsize fdate
+            fname=$(basename "$file")
+            fsize=$(du -h "$file" | awk '{print $1}')
+            fdate=$(stat -c '%y' "$file" | cut -d. -f1)
+            echo -e "${TAB}  ${GN}${COUNT})${CL} ${fname}"
+            echo -e "${TAB}     ${YW}${fsize}${CL} — ${fdate}"
+        done < <(ls -1t "${LOCAL_BACKUP_DIR}"/pi-hole_*teleporter*.zip)
+
+        echo ""
+        read -rp "  Select backup to restore [1-${COUNT}]: " selection
+        if ! [[ "$selection" =~ ^[0-9]+$ ]] || [[ "$selection" -lt 1 ]] || [[ "$selection" -gt "$COUNT" ]]; then
+            msg_error "Invalid selection"
+            exit 1
+        fi
+        RESTORE_FILE="${FILES[$((selection - 1))]}"
+    fi
+
+    # Validate file exists
+    if [[ ! -f "$RESTORE_FILE" ]]; then
+        msg_error "File not found: ${RESTORE_FILE}"
+        exit 1
+    fi
+
+    local RESTORE_NAME
+    RESTORE_NAME=$(basename "$RESTORE_FILE")
+    echo -e "${TAB}  Restoring: ${GN}${RESTORE_NAME}${CL}"
+    echo ""
+    read -rp "  This will overwrite the primary Pi-hole's config. Continue? [y/N]: " confirm
+    if [[ "${confirm,,}" != "y" ]]; then
+        echo ""
+        msg_ok "Exiting. No changes made."
+        echo ""
+        exit 0
+    fi
+    echo ""
+
+    # Import
+    msg_info "Importing backup on primary"
+    local IMPORT_OUTPUT
+    IMPORT_OUTPUT=$(pihole-FTL --teleporter "$RESTORE_FILE" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        msg_error "Import failed"
+        echo -e "${TAB}  Output: ${IMPORT_OUTPUT}"
+        exit 1
+    fi
+    local IMPORT_COUNT
+    IMPORT_COUNT=$(echo "$IMPORT_OUTPUT" | grep -c "^Imported" || echo "0")
+    msg_ok "Imported ${IMPORT_COUNT} items"
+
+    # Reload DNS
+    msg_info "Reloading DNS"
+    pihole reloaddns &>/dev/null
+    msg_ok "DNS reloaded"
+
+    # Update gravity
+    msg_info "Updating gravity (this may take a moment)"
+    pihole -g &>/dev/null && msg_ok "Gravity updated" || msg_warn "Gravity update returned non-zero"
+
+    echo ""
+    msg_ok "Restore complete!"
     echo ""
     exit 0
 }
@@ -474,7 +576,7 @@ show_diff() {
 # MAIN
 # ============================================================
 
-# Early exit for help, version, list, diff
+# Early exit for help, version, list, diff, restore
 for arg in "${@:-}"; do
     case "${arg:-}" in
         --help|-h) show_help ;;
@@ -485,6 +587,19 @@ for arg in "${@:-}"; do
             ;;
         --list) list_backups ;;
         --diff) show_diff ;;
+        --restore)
+            # Check if next arg is a file path
+            restore_file=""
+            found_restore=false
+            for a in "$@"; do
+                if [[ "$found_restore" == true ]] && [[ "$a" != --* ]]; then
+                    restore_file="$a"
+                    break
+                fi
+                [[ "$a" == "--restore" ]] && found_restore=true
+            done
+            restore_backup "$restore_file"
+            ;;
     esac
 done
 
@@ -527,17 +642,19 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}2)${CL} Sync but keep backup's settings (skip passwords/network)"
     echo -e "${TAB}  ${GN}3)${CL} Show diff (compare primary vs backup, no changes)"
     echo -e "${TAB}  ${GN}4)${CL} Backup only (local archive, no sync)"
-    echo -e "${TAB}  ${GN}5)${CL} List stored backups"
+    echo -e "${TAB}  ${GN}5)${CL} Restore a backup to primary"
+    echo -e "${TAB}  ${GN}6)${CL} List stored backups"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-5/q]: " choice
+    read -rp "  Select an option [1-6/q]: " choice
 
     case "$choice" in
         1) ;;
         2) SKIP_SETTINGS=true ;;
         3) show_diff ;;
         4) BACKUP_ONLY=true ;;
-        5) list_backups ;;
+        5) restore_backup ;;
+        6) list_backups ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
@@ -619,6 +736,7 @@ for TARGET in ${BACKUP_PIHOLES}; do
 
     if transfer_backup "$TARGET" && import_backup "$TARGET"; then
         reload_backup_dns "$TARGET"
+        update_gravity "$TARGET"
         cleanup_remote "$TARGET"
         SYNC_SUCCESS+=("$TARGET")
     else

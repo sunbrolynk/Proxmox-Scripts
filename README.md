@@ -186,6 +186,7 @@ done
 ```bash
 sudo pct-force-destroy 105           # Force destroy container 105
 sudo pct-force-destroy --all         # Clear all stale locks (no destroy)
+sudo pct-force-destroy --status      # Show all containers and lock state
 sudo pct-force-destroy --dry-run 105 # Preview what would happen
 sudo pct-force-destroy --dry-run --all  # Preview all stale locks
 sudo pct-force-destroy -h            # Show help
@@ -250,10 +251,12 @@ chmod +x /usr/local/bin/pihole-sync
 **Usage:**
 
 ```bash
-sudo pihole-sync                     # Interactive sync with confirmation
+sudo pihole-sync                     # Interactive sync with menu
 sudo pihole-sync -y                  # Sync without prompts (for cron)
 sudo pihole-sync --skip-settings     # Sync but keep backup's passwords/network config
 sudo pihole-sync --diff              # Show what differs without syncing
+sudo pihole-sync --restore           # Restore a backup to primary (interactive picker)
+sudo pihole-sync --restore /path/to/file.zip  # Restore specific backup
 sudo pihole-sync --backup-only       # Local backup only, no sync
 sudo pihole-sync --list              # List stored backups
 sudo pihole-sync -h                  # Show help

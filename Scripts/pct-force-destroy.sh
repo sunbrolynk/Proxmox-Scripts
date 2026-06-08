@@ -83,6 +83,10 @@ show_help() {
     echo -e "${TAB}${TAB}Show what locks would be cleared without doing anything."
     echo -e "${TAB}${TAB}Can be used with a CTID or with --all."
     echo ""
+    echo -e "${TAB}${GN}--status${CL}"
+    echo -e "${TAB}${TAB}Show all containers on this node with lock state and"
+    echo -e "${TAB}${TAB}storage backend. No changes made."
+    echo ""
     echo -e "${TAB}${GN}-h, --help${CL}"
     echo -e "${TAB}${TAB}Display this help and exit."
     echo ""
@@ -139,6 +143,61 @@ show_help() {
     exit 0
 }
 
+show_status() {
+    header_info
+    echo -e "${TAB}${BD}Container Status — $(hostname)${CL}"
+    echo ""
+
+    # Get all stale locks
+    local PVE_LOCKS CFS_LOCKS
+    PVE_LOCKS=$(ls /run/lock/lxc/pve-config-*.lock 2>/dev/null | sed 's/.*pve-config-\([0-9]*\)\.lock/\1/' || true)
+    CFS_LOCKS=$(ls -d /etc/pve/priv/lock/storage-* 2>/dev/null | xargs -I{} basename {} || true)
+
+    if [[ -n "$CFS_LOCKS" ]]; then
+        echo -e "${TAB}  ${RD}Stale CFS storage locks:${CL}"
+        for lock in $CFS_LOCKS; do
+            echo -e "${TAB}    ${CROSS} ${lock}"
+        done
+        echo ""
+    fi
+
+    # List all containers
+    printf "${TAB}  ${BD}%-8s %-10s %-12s %-20s %s${CL}\n" "CTID" "Status" "Lock" "Storage" "Name"
+    printf "${TAB}  ${BD}%-8s %-10s %-12s %-20s %s${CL}\n" "────" "──────" "────" "───────" "────"
+
+    while IFS= read -r line; do
+        local ctid status name storage lock_status
+        ctid=$(echo "$line" | awk '{print $1}')
+        [[ "$ctid" == "VMID" ]] && continue
+
+        status=$(echo "$line" | awk '{print $2}')
+        name=$(echo "$line" | awk '{print $3}')
+
+        # Detect storage backend
+        storage=$(grep -m1 "rootfs:" "/etc/pve/lxc/${ctid}.conf" 2>/dev/null | cut -d: -f2 | cut -d, -f1 | xargs || echo "unknown")
+
+        # Check for stale lock
+        if echo "$PVE_LOCKS" | grep -qw "$ctid"; then
+            lock_status="${RD}LOCKED${CL}"
+        else
+            lock_status="${GN}clean${CL}"
+        fi
+
+        # Color status
+        local status_colored
+        if [[ "$status" == "running" ]]; then
+            status_colored="${GN}${status}${CL}"
+        else
+            status_colored="${YW}${status}${CL}"
+        fi
+
+        printf "${TAB}  %-8s %-21s %-23s %-20s %s\n" "$ctid" "$status_colored" "$lock_status" "$storage" "$name"
+    done < <(pct list 2>/dev/null)
+
+    echo ""
+    exit 0
+}
+
 # Early exit for help and version
 case "${1:-}" in
     -h|--help) show_help ;;
@@ -147,6 +206,7 @@ case "${1:-}" in
         echo "${SCRIPT_URL}"
         exit 0
         ;;
+    --status) show_status ;;
 esac
 
 # Root check
@@ -164,6 +224,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
         --all) CLEAR_ALL=true ;;
+        --status) show_status ;;
         -h|--help|-V|--version) ;; # already handled
         *)
             if [[ "$arg" =~ ^[0-9]+$ ]]; then
@@ -186,9 +247,10 @@ if [[ -z "$CTID" ]] && [[ "$CLEAR_ALL" == false ]]; then
     echo -e "${TAB}  ${GN}2)${CL} Clear all stale locks (no destroy)"
     echo -e "${TAB}  ${GN}3)${CL} Dry run — preview locks for a container"
     echo -e "${TAB}  ${GN}4)${CL} Dry run — preview all stale locks"
+    echo -e "${TAB}  ${GN}5)${CL} Show container status and lock state"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-4/q]: " choice
+    read -rp "  Select an option [1-5/q]: " choice
 
     case "$choice" in
         1)
@@ -208,6 +270,7 @@ if [[ -z "$CTID" ]] && [[ "$CLEAR_ALL" == false ]]; then
             fi
             ;;
         4) DRY_RUN=true; CLEAR_ALL=true ;;
+        5) show_status ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
