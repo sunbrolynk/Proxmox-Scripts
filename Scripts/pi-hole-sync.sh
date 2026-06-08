@@ -16,6 +16,9 @@ BACKUP_SSH_USER="root"                # SSH user on the backup Pi-hole(s)
 BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole(s)
 LOCAL_BACKUP_DIR="/var/backups/pihole" # Where to store Teleporter archives locally
 RETENTION_COUNT=7                     # Number of local backups to keep
+GOTIFY_URL=""                         # Gotify server URL (e.g. http://10.10.3.6:80)
+GOTIFY_TOKEN=""                       # Gotify application token
+GOTIFY_PRIORITY=5                     # Gotify notification priority (1-10)
 # ============================================================
 
 set -euo pipefail
@@ -113,6 +116,12 @@ show_help() {
     echo -e "${TAB}${GN}--list${CL}"
     echo -e "${TAB}${TAB}List local Teleporter backups."
     echo ""
+    echo -e "${TAB}${GN}--test-notify${CL}"
+    echo -e "${TAB}${TAB}Send a test notification to Gotify."
+    echo ""
+    echo -e "${TAB}${GN}--schedule${CL}"
+    echo -e "${TAB}${TAB}Set up, change, or remove the cron schedule."
+    echo ""
     echo -e "${TAB}${GN}-h, --help${CL}"
     echo -e "${TAB}${TAB}Display this help and exit."
     echo ""
@@ -192,6 +201,81 @@ msg_error() {
 msg_warn() {
     local msg="$1"
     echo -e "${BFR}${TAB}${INFO} ${YW}${msg}${CL}"
+}
+
+send_gotify() {
+    local title="$1"
+    local message="$2"
+    local priority="${3:-$GOTIFY_PRIORITY}"
+
+    if [[ -z "$GOTIFY_URL" ]] || [[ -z "$GOTIFY_TOKEN" ]]; then
+        return 0
+    fi
+
+    curl -s -X POST "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"title\": \"${title}\",
+            \"message\": $(echo "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "\"${message}\""),
+            \"priority\": ${priority},
+            \"extras\": {
+                \"client::display\": {
+                    \"contentType\": \"text/markdown\"
+                }
+            }
+        }" &>/dev/null || true
+}
+
+test_gotify() {
+    header_info
+    echo -e "${TAB}${BD}Gotify Notification Test${CL}"
+    echo ""
+
+    if [[ -z "$GOTIFY_URL" ]]; then
+        msg_error "GOTIFY_URL not configured"
+        echo -e "${TAB}  Edit the script and set GOTIFY_URL and GOTIFY_TOKEN"
+        echo ""
+        exit 1
+    fi
+    if [[ -z "$GOTIFY_TOKEN" ]]; then
+        msg_error "GOTIFY_TOKEN not configured"
+        echo ""
+        exit 1
+    fi
+
+    local test_message="### ✅ Connection Successful
+
+**Script:** \`${SCRIPT_NAME}\`
+**Host:** \`$(hostname)\`
+**Time:** $(date '+%Y-%m-%d %H:%M:%S')
+
+---
+
+*Pi-hole Sync is configured and ready to send alerts.*"
+
+    msg_info "Sending test notification to ${GOTIFY_URL}"
+    local response
+    response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+        "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"title\": \"🔄 Pi-hole Sync — Test\",
+            \"message\": $(echo "$test_message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null),
+            \"priority\": ${GOTIFY_PRIORITY},
+            \"extras\": {
+                \"client::display\": {
+                    \"contentType\": \"text/markdown\"
+                }
+            }
+        }" 2>/dev/null)
+
+    if [[ "$response" == "200" ]]; then
+        msg_ok "Test notification sent successfully"
+    else
+        msg_error "Notification failed (HTTP ${response})"
+    fi
+    echo ""
+    exit 0
 }
 
 # ============================================================
@@ -578,6 +662,101 @@ show_diff() {
     exit 0
 }
 
+manage_cron() {
+    header_info
+    echo -e "${TAB}${BD}Schedule Manager${CL}"
+    echo ""
+
+    local CRON_CMD="/usr/local/bin/${SCRIPT_NAME} -y >> ${LOCAL_BACKUP_DIR}/${SCRIPT_NAME}.log 2>&1"
+    local CURRENT_CRON
+    CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
+
+    if [[ -n "$CURRENT_CRON" ]]; then
+        echo -e "${TAB}  ${GN}Current schedule:${CL}"
+        echo -e "${TAB}  ${BL}${CURRENT_CRON}${CL}"
+        echo ""
+        echo -e "${TAB}  ${GN}1)${CL} Change schedule"
+        echo -e "${TAB}  ${GN}2)${CL} Remove schedule"
+        echo -e "${TAB}  ${RD}q)${CL} Back"
+        echo ""
+        read -rp "  Select [1-2/q]: " cron_choice
+        case "$cron_choice" in
+            1) ;; # fall through to schedule picker
+            2)
+                crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" | crontab -
+                echo ""
+                msg_ok "Schedule removed"
+                echo ""
+                exit 0
+                ;;
+            *)
+                echo ""
+                exit 0
+                ;;
+        esac
+        echo ""
+    else
+        echo -e "${TAB}  ${YW}No schedule configured${CL}"
+        echo ""
+    fi
+
+    echo -e "${TAB}  ${BD}How often should ${SCRIPT_NAME} run?${CL}"
+    echo ""
+    echo -e "${TAB}  ${GN}1)${CL} Every 5 minutes"
+    echo -e "${TAB}  ${GN}2)${CL} Every 15 minutes"
+    echo -e "${TAB}  ${GN}3)${CL} Every hour"
+    echo -e "${TAB}  ${GN}4)${CL} Every 6 hours"
+    echo -e "${TAB}  ${GN}5)${CL} Daily at 3:00 AM"
+    echo -e "${TAB}  ${GN}6)${CL} Daily at custom time"
+    echo -e "${TAB}  ${GN}7)${CL} Custom cron expression"
+    echo -e "${TAB}  ${RD}q)${CL} Cancel"
+    echo ""
+    read -rp "  Select [1-7/q]: " schedule_choice
+
+    local CRON_SCHEDULE=""
+    case "$schedule_choice" in
+        1) CRON_SCHEDULE="*/5 * * * *" ;;
+        2) CRON_SCHEDULE="*/15 * * * *" ;;
+        3) CRON_SCHEDULE="0 * * * *" ;;
+        4) CRON_SCHEDULE="0 */6 * * *" ;;
+        5) CRON_SCHEDULE="0 3 * * *" ;;
+        6)
+            read -rp "  Hour (0-23): " cron_hour
+            read -rp "  Minute (0-59): " cron_min
+            if ! [[ "$cron_hour" =~ ^[0-9]+$ ]] || [[ "$cron_hour" -gt 23 ]]; then
+                msg_error "Invalid hour"
+                exit 1
+            fi
+            if ! [[ "$cron_min" =~ ^[0-9]+$ ]] || [[ "$cron_min" -gt 59 ]]; then
+                msg_error "Invalid minute"
+                exit 1
+            fi
+            CRON_SCHEDULE="${cron_min} ${cron_hour} * * *"
+            ;;
+        7)
+            read -rp "  Cron expression (e.g. */10 * * * *): " CRON_SCHEDULE
+            if [[ -z "$CRON_SCHEDULE" ]]; then
+                msg_error "No expression entered"
+                exit 1
+            fi
+            ;;
+        *)
+            echo ""
+            exit 0
+            ;;
+    esac
+
+    # Remove existing entry and add new one
+    local NEW_CRON="${CRON_SCHEDULE} ${CRON_CMD}"
+    (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "$NEW_CRON") | crontab -
+
+    echo ""
+    msg_ok "Schedule set: ${GN}${CRON_SCHEDULE}${CL}"
+    echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+    echo ""
+    exit 0
+}
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -593,6 +772,8 @@ for arg in "${@:-}"; do
             ;;
         --list) list_backups ;;
         --diff) show_diff ;;
+        --test-notify) test_gotify ;;
+        --schedule) manage_cron ;;
         --restore)
             # Check if next arg is a file path
             restore_file=""
@@ -650,9 +831,11 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}4)${CL} Backup only (local archive, no sync)"
     echo -e "${TAB}  ${GN}5)${CL} Restore a backup to primary"
     echo -e "${TAB}  ${GN}6)${CL} List stored backups"
+    echo -e "${TAB}  ${GN}7)${CL} Test Gotify notification"
+    echo -e "${TAB}  ${GN}8)${CL} Manage cron schedule"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-6/q]: " choice
+    read -rp "  Select an option [1-8/q]: " choice
 
     case "$choice" in
         1) ;;
@@ -661,6 +844,8 @@ if [[ "$INTERACTIVE" == true ]]; then
         4) BACKUP_ONLY=true ;;
         5) restore_backup ;;
         6) list_backups ;;
+        7) test_gotify ;;
+        8) manage_cron ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
@@ -785,5 +970,44 @@ for TARGET in ${BACKUP_PIHOLES}; do
     echo -e "${TAB}  Backup:   ${GN}http://${TARGET}/admin${CL}"
 done
 echo ""
+
+# Send Gotify notification (only in automated/cron mode)
+if [[ "$AUTO_YES" == true ]]; then
+    success_list="" 
+    fail_list=""
+    for t in "${SYNC_SUCCESS[@]:-}"; do
+        [[ -n "$t" ]] && success_list="${success_list}| \`${t}\` | 🟢 Synced |\n"
+    done
+    for t in "${SYNC_FAILED[@]:-}"; do
+        [[ -n "$t" ]] && fail_list="${fail_list}| \`${t}\` | 🔴 **Failed** |\n"
+    done
+
+    if [[ ${#SYNC_FAILED[@]} -eq 0 ]]; then
+        notify_message="### 🟢 Sync Successful
+
+**Primary:** \`${PRIMARY_IP}\`
+**Time:** $(date '+%Y-%m-%d %H:%M:%S')
+**Archive:** \`${BACKUP_NAME}\`
+
+| Target | Status |
+|--------|--------|
+${success_list}
+*All backup Pi-holes are in sync.*"
+
+        send_gotify "🔄 Pi-hole Sync — Success" "$notify_message"
+    else
+        notify_message="### 🔴 Sync Failed
+
+**Primary:** \`${PRIMARY_IP}\`
+**Time:** $(date '+%Y-%m-%d %H:%M:%S')
+
+| Target | Status |
+|--------|--------|
+${success_list}${fail_list}
+**⚠️ Check the log for details.**"
+
+        send_gotify "🔄 Pi-hole Sync — Failed" "$notify_message" 8
+    fi
+fi
 
 cleanup
