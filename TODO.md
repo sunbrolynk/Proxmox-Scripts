@@ -21,8 +21,8 @@
 - [x] Interactive menu with all options
 - [x] SHA256 checksum verification of downloaded binary against GitHub release
 - [ ] GPG signature verification against Traefik's signing key (full supply chain hardening)
-- [ ] `--cron` mode with file logging and Gotify notification on success/failure
-- [ ] `--test-notify` flag to test Gotify integration
+- [x] `--cron` mode with file logging and Gotify notification on success/failure
+- [x] `--test-notify` flag to test Gotify integration (add with --cron mode)
 
 ### pct-force-destroy.sh
 - [x] Validates container exists and is stopped
@@ -36,8 +36,6 @@
 - [x] Interactive menu when run with no args
 - [x] `--status` flag to show all containers and their lock state on this node
 - [x] Auto-detect storage backend type per container (NFS, local-lvm, ZFS)
-- [ ] Gotify notification when locks are force-cleared
-- [ ] `--test-notify` flag to test Gotify integration
 
 ### pihole-sync.sh
 - [x] Teleporter-based backup and sync
@@ -55,8 +53,8 @@
 - [x] Interactive menu with all options
 - [x] `--restore <file>` mode to restore a specific backup to the primary
 - [x] Trigger gravity update on backup after import (`pihole -g`)
-- [ ] Gotify notification on sync success/failure
-- [ ] `--test-notify` flag to test Gotify integration
+- [x] Gotify notification on sync success/failure
+- [x] `--test-notify` flag to test Gotify integration
 
 ## Planned Scripts
 
@@ -79,34 +77,18 @@ Monitors NFS mount health across Proxmox cluster nodes. Detects stale or unrespo
 - [x] Latency measurement with color-coded thresholds
 - [x] Mount options display (hard vs soft detection)
 
-### cert-monitor.sh
-Checks SSL certificate expiry dates across reverse proxy configurations. Catches renewal failures before users notice.
+## Gotify Integration (shared across scripts)
 
-- [ ] Scan SWAG proxy confs for proxied domains
-- [ ] Scan Traefik dynamic configs for proxied domains
-- [ ] Check cert expiry via openssl s_client for each domain
-- [ ] Configurable warning threshold (default: 14 days)
-- [ ] Alert via Gotify for certs nearing expiry
-- [ ] `--test-notify` flag to test Gotify integration
-- [ ] `--json` flag for machine-readable output
-- [ ] Support for checking certs on remote hosts via SSH
-- [ ] Summary display with color-coded status (green/yellow/red)
-- [ ] Designed to run as a daily cron job
-- [ ] Man-style help and interactive menu
-
-## Gotify Integration (shared across all scripts)
-
-All scripts will share a common Gotify notification pattern:
-
-- [ ] Shared config variables: GOTIFY_URL, GOTIFY_TOKEN, GOTIFY_PRIORITY
-- [ ] `--test-notify` flag on every script to verify Gotify connectivity
-- [ ] Notification on: update success, update failure, sync complete, lock cleared, cert expiring, NFS unhealthy
-- [ ] Notifications include: script name, action taken, result, timestamp
-- [ ] Silent in interactive mode (user sees the output), active in cron/automated mode
+- [x] Markdown-formatted notifications with tables and color indicators
+- [x] `--test-notify` flag on nfs-watchdog, pihole-sync, and update-traefik
+- [x] nfs-watchdog: alerts on stale mounts (cron mode)
+- [x] pihole-sync: alerts on sync success/failure (cron mode)
+- [x] update-traefik: alerts on update results (--cron mode)
 - [ ] Consider extracting Gotify functions into a shared library (source-able file) to avoid duplication
 
 ## Ideas to Investigate
 
+- **cert-monitor.sh** — Scan proxy confs and check cert expiry via openssl, alert on expiring. Low priority since SWAG, Cloudflare, and Traefik dashboards already show expiry dates
 - Proxmox VM template builder — automate creating base VM templates with common packages
 - Bulk snapshot cleanup — age-based cleanup across VMs and LXCs
 - Docker compose updater — pull latest images, recreate containers, verify health
