@@ -129,6 +129,7 @@ When reviewing contributions or PRs, verify:
 | update-traefik.sh | Update Traefik binary and Traefik Manager | Active |
 | pct-force-destroy.sh | Force destroy LXCs with stale NFS locks | Active |
 | pihole-sync.sh | Sync Pi-hole config from primary to backup | Active |
+| nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active |
 
 ## Architecture Notes
 
