@@ -99,6 +99,9 @@ show_help() {
     echo -e "${TAB}${GN}--test-notify${CL}"
     echo -e "${TAB}${TAB}Send a test notification to Gotify."
     echo ""
+    echo -e "${TAB}${GN}--schedule${CL}"
+    echo -e "${TAB}${TAB}Set up, change, or remove the cron schedule."
+    echo ""
     echo -e "${TAB}${GN}-h, --help${CL}"
     echo -e "${TAB}${TAB}Display this help and exit."
     echo ""
@@ -568,6 +571,87 @@ force_remount_all() {
     echo ""
 }
 
+manage_cron() {
+    header_info
+    echo -e "${TAB}${BD}Schedule Manager${CL}"
+    echo ""
+
+    local CRON_CMD="/usr/local/bin/${SCRIPT_NAME} -y >> ${LOG_FILE} 2>&1"
+    local CURRENT_CRON
+    CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
+
+    if [[ -n "$CURRENT_CRON" ]]; then
+        echo -e "${TAB}  ${GN}Current schedule:${CL}"
+        echo -e "${TAB}  ${BL}${CURRENT_CRON}${CL}"
+        echo ""
+        echo -e "${TAB}  ${GN}1)${CL} Change schedule"
+        echo -e "${TAB}  ${GN}2)${CL} Remove schedule"
+        echo -e "${TAB}  ${RD}q)${CL} Back"
+        echo ""
+        read -rp "  Select [1-2/q]: " cron_choice
+        case "$cron_choice" in
+            1) ;; # fall through to schedule picker
+            2)
+                crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" | crontab -
+                echo ""
+                msg_ok "Schedule removed"
+                echo ""
+                exit 0
+                ;;
+            *)
+                echo ""
+                exit 0
+                ;;
+        esac
+        echo ""
+    else
+        echo -e "${TAB}  ${YW}No schedule configured${CL}"
+        echo ""
+    fi
+
+    echo -e "${TAB}  ${BD}How often should ${SCRIPT_NAME} run?${CL}"
+    echo ""
+    echo -e "${TAB}  ${GN}1)${CL} Every 5 minutes (recommended)"
+    echo -e "${TAB}  ${GN}2)${CL} Every 10 minutes"
+    echo -e "${TAB}  ${GN}3)${CL} Every 15 minutes"
+    echo -e "${TAB}  ${GN}4)${CL} Every 30 minutes"
+    echo -e "${TAB}  ${GN}5)${CL} Every hour"
+    echo -e "${TAB}  ${GN}6)${CL} Custom cron expression"
+    echo -e "${TAB}  ${RD}q)${CL} Cancel"
+    echo ""
+    read -rp "  Select [1-6/q]: " schedule_choice
+
+    local CRON_SCHEDULE=""
+    case "$schedule_choice" in
+        1) CRON_SCHEDULE="*/5 * * * *" ;;
+        2) CRON_SCHEDULE="*/10 * * * *" ;;
+        3) CRON_SCHEDULE="*/15 * * * *" ;;
+        4) CRON_SCHEDULE="*/30 * * * *" ;;
+        5) CRON_SCHEDULE="0 * * * *" ;;
+        6)
+            read -rp "  Cron expression (e.g. */5 * * * *): " CRON_SCHEDULE
+            if [[ -z "$CRON_SCHEDULE" ]]; then
+                msg_error "No expression entered"
+                exit 1
+            fi
+            ;;
+        *)
+            echo ""
+            exit 0
+            ;;
+    esac
+
+    # Remove existing entry and add new one
+    local NEW_CRON="${CRON_SCHEDULE} ${CRON_CMD}"
+    (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "$NEW_CRON") | crontab -
+
+    echo ""
+    msg_ok "Schedule set: ${GN}${CRON_SCHEDULE}${CL}"
+    echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+    echo ""
+    exit 0
+}
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -583,6 +667,7 @@ for arg in "${@:-}"; do
             ;;
         --status) show_status ;;
         --test-notify) test_gotify ;;
+        --schedule) manage_cron ;;
     esac
 done
 
@@ -617,9 +702,10 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}3)${CL} Dry run (check only, no remount)"
     echo -e "${TAB}  ${GN}4)${CL} Force remount all NFS mounts"
     echo -e "${TAB}  ${GN}5)${CL} Test Gotify notification"
+    echo -e "${TAB}  ${GN}6)${CL} Manage cron schedule"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-5/q]: " choice
+    read -rp "  Select an option [1-6/q]: " choice
 
     case "$choice" in
         1) ;;
@@ -627,6 +713,7 @@ if [[ "$INTERACTIVE" == true ]]; then
         3) DRY_RUN=true ;;
         4) DO_REMOUNT_ALL=true ;;
         5) test_gotify ;;
+        6) manage_cron ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
