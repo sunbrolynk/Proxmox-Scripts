@@ -917,24 +917,70 @@ if [[ "$BACKUP_ONLY" == true ]]; then
     exit 0
 fi
 
-# Sync to each backup target
+# Sync to each backup target (parallel when multiple targets)
 SYNC_SUCCESS=()
 SYNC_FAILED=()
 
-for TARGET in ${BACKUP_PIHOLES}; do
-    echo -e "${TAB}${BL}▸ Syncing to ${TARGET}${CL}"
-    echo ""
+sync_single_target() {
+    local TARGET="$1"
+    transfer_backup "$TARGET" \
+        && import_backup "$TARGET" \
+        && reload_backup_dns "$TARGET" \
+        && update_gravity "$TARGET" \
+        && cleanup_remote "$TARGET"
+}
 
-    if transfer_backup "$TARGET" && import_backup "$TARGET"; then
-        reload_backup_dns "$TARGET"
-        update_gravity "$TARGET"
-        cleanup_remote "$TARGET"
-        SYNC_SUCCESS+=("$TARGET")
+TARGET_LIST=(${BACKUP_PIHOLES})
+TARGET_COUNT=${#TARGET_LIST[@]}
+
+if [[ "$TARGET_COUNT" -eq 1 ]]; then
+    # Single target — run directly with live output
+    echo -e "${TAB}${BL}▸ Syncing to ${TARGET_LIST[0]}${CL}"
+    echo ""
+    if sync_single_target "${TARGET_LIST[0]}"; then
+        SYNC_SUCCESS+=("${TARGET_LIST[0]}")
     else
-        SYNC_FAILED+=("$TARGET")
+        SYNC_FAILED+=("${TARGET_LIST[0]}")
     fi
     echo ""
-done
+else
+    # Multiple targets — run in parallel
+    echo -e "${TAB}${BL}▸ Syncing to ${TARGET_COUNT} targets in parallel${CL}"
+    echo ""
+
+    PARALLEL_PIDS=()
+    PARALLEL_RESULTS=$(mktemp -d /tmp/.pihole-sync-XXXXXX)
+
+    for TARGET in "${TARGET_LIST[@]}"; do
+        (
+            if sync_single_target "$TARGET" &>/dev/null; then
+                echo "0" > "${PARALLEL_RESULTS}/${TARGET}"
+            else
+                echo "1" > "${PARALLEL_RESULTS}/${TARGET}"
+            fi
+        ) &
+        PARALLEL_PIDS+=($!)
+    done
+
+    # Wait for all targets
+    for pid in "${PARALLEL_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    # Collect results
+    for TARGET in "${TARGET_LIST[@]}"; do
+        if [[ -f "${PARALLEL_RESULTS}/${TARGET}" ]] && [[ "$(cat "${PARALLEL_RESULTS}/${TARGET}")" == "0" ]]; then
+            msg_ok "${TARGET} — synced"
+            SYNC_SUCCESS+=("$TARGET")
+        else
+            msg_error "${TARGET} — failed"
+            SYNC_FAILED+=("$TARGET")
+        fi
+    done
+
+    rm -rf "$PARALLEL_RESULTS"
+    echo ""
+fi
 
 # Prune old local backups
 prune_backups

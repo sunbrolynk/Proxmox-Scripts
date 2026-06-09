@@ -444,50 +444,127 @@ run_checks() {
         return 0
     fi
 
-    while IFS=' ' read -r source mountpoint fstype; do
-        msg_info "Checking ${mountpoint}"
+    # Count mounts
+    local MOUNT_COUNT
+    MOUNT_COUNT=$(echo "$mounts" | wc -l)
 
-        # Read test
-        if ! test_mount_readable "$mountpoint"; then
-            msg_error "${mountpoint} — STALE (read timed out after ${CHECK_TIMEOUT}s)"
-            STALE_MOUNTS+=("$mountpoint")
+    if [[ "$MOUNT_COUNT" -gt 1 ]]; then
+        # Multiple mounts — check in parallel
+        msg_info "Checking ${MOUNT_COUNT} mounts in parallel"
+        echo ""
 
-            if [[ "$DRY_RUN_MODE" == true ]]; then
+        local CHECK_RESULTS
+        CHECK_RESULTS=$(mktemp -d /tmp/.nfs-check-XXXXXX)
+        local CHECK_PIDS=()
+
+        while IFS=' ' read -r source mountpoint fstype; do
+            (
+                local result="healthy"
+                local latency="0"
+
+                if ! test_mount_readable "$mountpoint"; then
+                    result="stale"
+                else
+                    if ! test_mount_writable "$mountpoint"; then
+                        result="readonly"
+                    fi
+                    latency=$(test_mount_latency "$mountpoint")
+                    if [[ "$latency" == "timeout" ]]; then
+                        result="stale"
+                    elif [[ "$latency" -gt 1000 ]]; then
+                        result="slow"
+                    fi
+                fi
+                echo "${result}|${latency}" > "${CHECK_RESULTS}/$(echo "$mountpoint" | tr '/' '_')"
+            ) &
+            CHECK_PIDS+=($!)
+        done <<< "$mounts"
+
+        # Wait for all checks
+        for pid in "${CHECK_PIDS[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+
+        # Process results
+        while IFS=' ' read -r source mountpoint fstype; do
+            local result_file="${CHECK_RESULTS}/$(echo "$mountpoint" | tr '/' '_')"
+            if [[ -f "$result_file" ]]; then
+                local result latency
+                IFS='|' read -r result latency < "$result_file"
+
+                case "$result" in
+                    stale)
+                        msg_error "${mountpoint} — STALE (timed out after ${CHECK_TIMEOUT}s)"
+                        STALE_MOUNTS+=("$mountpoint")
+                        if [[ "$DRY_RUN_MODE" == true ]] && [[ "$AUTO_REMOUNT" == true ]]; then
+                            msg_warn "Would auto-remount ${mountpoint}"
+                        elif [[ "$DRY_RUN_MODE" != true ]] && [[ "$AUTO_REMOUNT" == true ]]; then
+                            if remount_nfs "$mountpoint"; then
+                                REMOUNTED_MOUNTS+=("$mountpoint")
+                            else
+                                FAILED_REMOUNTS+=("$mountpoint")
+                            fi
+                        fi
+                        ;;
+                    readonly)
+                        msg_warn "${mountpoint} — readable but NOT writable"
+                        HEALTHY_MOUNTS+=("$mountpoint")
+                        ;;
+                    slow)
+                        msg_warn "${mountpoint} — healthy but slow (${latency}ms)"
+                        HEALTHY_MOUNTS+=("$mountpoint")
+                        ;;
+                    healthy)
+                        msg_ok "${mountpoint} — healthy (${latency}ms)"
+                        HEALTHY_MOUNTS+=("$mountpoint")
+                        ;;
+                esac
+            fi
+        done <<< "$mounts"
+
+        rm -rf "$CHECK_RESULTS"
+    else
+        # Single mount — check directly with live output
+        while IFS=' ' read -r source mountpoint fstype; do
+            msg_info "Checking ${mountpoint}"
+
+            if ! test_mount_readable "$mountpoint"; then
+                msg_error "${mountpoint} — STALE (read timed out after ${CHECK_TIMEOUT}s)"
+                STALE_MOUNTS+=("$mountpoint")
+
+                if [[ "$DRY_RUN_MODE" == true ]]; then
+                    if [[ "$AUTO_REMOUNT" == true ]]; then
+                        msg_warn "Would auto-remount ${mountpoint}"
+                    fi
+                    continue
+                fi
+
                 if [[ "$AUTO_REMOUNT" == true ]]; then
-                    msg_warn "Would auto-remount ${mountpoint}"
+                    if remount_nfs "$mountpoint"; then
+                        REMOUNTED_MOUNTS+=("$mountpoint")
+                    else
+                        FAILED_REMOUNTS+=("$mountpoint")
+                    fi
                 fi
                 continue
             fi
 
-            # Auto-remount if enabled
-            if [[ "$AUTO_REMOUNT" == true ]]; then
-                if remount_nfs "$mountpoint"; then
-                    REMOUNTED_MOUNTS+=("$mountpoint")
-                else
-                    FAILED_REMOUNTS+=("$mountpoint")
-                fi
+            if ! test_mount_writable "$mountpoint"; then
+                msg_warn "${mountpoint} — readable but NOT writable"
+                HEALTHY_MOUNTS+=("$mountpoint")
+                continue
             fi
-            continue
-        fi
 
-        # Write test
-        if ! test_mount_writable "$mountpoint"; then
-            msg_warn "${mountpoint} — readable but NOT writable"
+            local latency
+            latency=$(test_mount_latency "$mountpoint")
+            if [[ "$latency" != "timeout" ]] && [[ "$latency" -gt 1000 ]]; then
+                msg_warn "${mountpoint} — healthy but slow (${latency}ms)"
+            else
+                msg_ok "${mountpoint} — healthy (${latency}ms)"
+            fi
             HEALTHY_MOUNTS+=("$mountpoint")
-            continue
-        fi
-
-        # Latency test
-        local latency
-        latency=$(test_mount_latency "$mountpoint")
-        if [[ "$latency" != "timeout" ]] && [[ "$latency" -gt 1000 ]]; then
-            msg_warn "${mountpoint} — healthy but slow (${latency}ms)"
-        else
-            msg_ok "${mountpoint} — healthy (${latency}ms)"
-        fi
-        HEALTHY_MOUNTS+=("$mountpoint")
-
-    done <<< "$mounts"
+        done <<< "$mounts"
+    fi
 
     echo ""
 
