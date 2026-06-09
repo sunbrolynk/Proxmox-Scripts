@@ -84,7 +84,6 @@ Monitors NFS mount health across Proxmox cluster nodes. Detects stale or unrespo
 - [x] nfs-watchdog: alerts on stale mounts (cron mode)
 - [x] pihole-sync: alerts on sync success/failure (cron mode)
 - [x] update-traefik: alerts on update results (--cron mode)
-- [ ] Consider extracting Gotify functions into a shared library (source-able file) to avoid duplication
 
 ## Ideas to Investigate
 
