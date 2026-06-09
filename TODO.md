@@ -20,7 +20,7 @@
 - [x] Support for ARM64 architecture detection and binary selection
 - [x] Interactive menu with all options
 - [x] SHA256 checksum verification of downloaded binary against GitHub release
-- [ ] GPG signature verification against Traefik's signing key (full supply chain hardening)
+- [ ] ~~GPG signature verification~~ — blocked, Traefik doesn't sign binary releases ([upstream issue #6757](https://github.com/traefik/traefik/issues/6757))
 - [x] `--cron` mode with file logging and Gotify notification on success/failure
 - [x] `--test-notify` flag to test Gotify integration (add with --cron mode)
 
