@@ -18,6 +18,8 @@ This file provides context for AI assistants (Claude, Copilot, etc.) working on 
 
 **Every script is fully standalone.** Users deploy by `wget`-ing a single `.sh` file and running it. Scripts must NEVER depend on a shared library, external file, or anything else being present on the system. All functions are inline in each script, even though this means duplication across scripts. This is intentional — it's the right tradeoff for single-file `wget`-and-run tools. Do not propose a shared library unless the repo grows to 10+ scripts AND the owner explicitly asks.
 
+A script MAY create and manage its own runtime state files (e.g. a chmod-600 targets list, a parsed settings file, a sealed-secrets dir) as long as the script still runs correctly when none of them exist yet. The dependency rule is about *required* external files, not about a script's own optional, self-created scratch.
+
 To keep duplicated functions consistent across scripts, use `script-template.sh` and `PATTERNS.md` (both in the repo) as the source of truth. When updating a common function, update the template/patterns first, then propagate to each script.
 
 ## Script Standards
@@ -75,7 +77,7 @@ Full man-page sections in this order: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, CONF
 - **Root check** — if the script needs root
 - **Preflight checks** — verify dependencies BEFORE the menu or work
 - **Interactive menu** — when run with no args; every flag should also be a menu option
-- **Interactive prompts** — offer to fix problems (install packages, start services)
+- **Interactive prompts** — offer to fix problems (install packages, start services, install self to the canonical path)
 - **Automatic backups + rollback** — before modifying binaries/configs; auto-restore on failure
 - **Clear error messages** — tell the user WHAT failed and HOW to fix it manually
 - **Summary on completion** — final versions, URLs, status
@@ -88,6 +90,13 @@ When an operation runs across multiple independent targets (mounts, hosts, conta
 - Optional Gotify notifications via `GOTIFY_URL`/`GOTIFY_TOKEN`/`GOTIFY_PRIORITY` config vars + `--test-notify` flag. Markdown-formatted messages with tables. Only fire in automated/cron mode, silent interactively.
 - **Secure Gotify**: never put the token in the URL (`?token=`) — it leaks in `ps aux`. Use a temp curl config file (chmod 600) with an `X-Gotify-Key` header. See PATTERNS.md "secure gotify".
 - Not every script needs notifications. A purely manual tool (e.g. pct-force-destroy) doesn't.
+
+### Credentials, Settings & Self-Install (advanced; see PATTERNS.md 14–17)
+Not every script needs these, but when a script must store a replayable secret, persist setup choices, or run unattended forever after, follow the established idioms rather than inventing new ones:
+- **Sealed credentials** (PATTERNS.md 14): secrets that must be replayed (FTP passwords, cron-used Gotify tokens) are sealed with `systemd-creds` (TPM-bound where available; chmod-600 fallback), never written plaintext into the script. Resolve sealed-first; store `@SECRET:<id>` references, not literals. Be honest that sealing doesn't defend against an already-root attacker — prefer credential-less transports (SSH keys, NFS).
+- **Managed settings** (PATTERNS.md 15): persisted non-secret choices live in a chmod-600 file that is **parsed against a key whitelist, never `source`d**.
+- **Live target verification** (PATTERNS.md 16): a saved remote destination is verified at add-time by writing, reading back, and deleting a canary file.
+- **Guided setup + self-install** (PATTERNS.md 17): a one-time wizard (mandatory step first, optional steps skippable) plus self-install to `/usr/local/bin`, with scheduling gated on being installed. `pve-config-backup.sh` is the reference implementation for all four.
 
 ### Flow Pattern (complex interactive scripts)
 1. Early exit for `--help`/`-h`, `--version`/`-V`, and read-only info flags (`--status`, `--test-notify`, `--schedule`)
@@ -112,7 +121,7 @@ When an operation runs across multiple independent targets (mounts, hosts, conta
 ## Building a New Script
 
 1. Copy `script-template.sh` as the starting skeleton.
-2. Pull the exact idioms (dynamic config help, parallel block, secure Gotify, cron manager, interactive menu) from `PATTERNS.md`.
+2. Pull the exact idioms (dynamic config help, parallel block, secure Gotify, cron manager, interactive menu, and where relevant sealed credentials / managed settings / target verification / guided setup) from `PATTERNS.md`.
 3. Fill in config block, metadata, header art, preflight, and the core logic.
 4. Add a collapsible `<details>` section to README.md.
 5. Add the script to the table in this file and to TODO.md with a feature checklist.
@@ -124,6 +133,8 @@ When an operation runs across multiple independent targets (mounts, hosts, conta
 ### Security (CRITICAL)
 - [ ] No hardcoded credentials, tokens, keys, or secrets
 - [ ] Gotify tokens never in URLs/process args (use curl config file + header)
+- [ ] Replayable secrets sealed (systemd-creds / chmod-600 fallback), never plaintext in-script; references stored, not literals
+- [ ] Any managed settings file is PARSED against a whitelist, never `source`d
 - [ ] No obfuscated or minified code — every line readable
 - [ ] No `curl | bash` or `wget | sh` from untrusted external sources
 - [ ] No phone-home, telemetry, or analytics
@@ -136,7 +147,7 @@ When an operation runs across multiple independent targets (mounts, hosts, conta
 - [ ] No shell injection vectors (quote all variables: `"$var"`)
 - [ ] Input validation on user-provided paths/IDs/URLs
 - [ ] Temp files in /tmp with `mktemp` unique names, cleaned up on exit (incl. CTRL+C)
-- [ ] File permissions set explicitly (755 binaries, 600 secrets, never 777)
+- [ ] File permissions set explicitly (755 binaries, 600 secrets, 700 secret dirs, never 777)
 
 ### Known Attack Patterns to Watch For
 - **Typosquatting in URLs** — verify download domains match official sources exactly
@@ -147,6 +158,7 @@ When an operation runs across multiple independent targets (mounts, hosts, conta
 - **Symlink attacks** — following symlinks to overwrite system files
 - **Race conditions** — TOCTOU bugs in temp file handling
 - **Embedded binaries** — base64 blobs decoded and executed at runtime
+- **Config-file sourcing** — `source`-ing a writable settings file is code execution; parse a whitelist instead
 
 ### Quality
 - [ ] `set -euo pipefail` + `shopt -s inherit_errexit nullglob`
@@ -181,12 +193,15 @@ When an operation runs across multiple independent targets (mounts, hosts, conta
 | pct-force-destroy.sh | Force destroy LXCs with stale NFS locks | Active |
 | pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active |
 | nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active |
+| pve-config-backup.sh | Back up Proxmox VE host config (the gap PBS/vzdump leave) | Active |
 
 ## Architecture Notes
 
 Scripts target two environments:
 
 1. **Inside Proxmox VMs/LXCs** (e.g. update-traefik.sh) — copied into the guest OS and run locally. No Proxmox API access or host privileges needed.
-2. **On Proxmox hosts** (e.g. pct-force-destroy.sh, nfs-watchdog.sh) — run on the node with root. Interact with PVE tools (pct, qm) and cluster filesystem (pmxcfs).
+2. **On Proxmox hosts** (e.g. pct-force-destroy.sh, nfs-watchdog.sh, pve-config-backup.sh) — run on the node with root. Interact with PVE tools (pct, qm), the cluster filesystem (pmxcfs), and host-level config under `/etc`.
 
-Scripts should clearly document which environment they target. Cluster-host scripts are deployed to all nodes via an `scp` loop.
+Scripts should clearly document which environment they target. Cluster-host scripts are deployed to all nodes via an `scp` loop. For host scripts that capture or act on per-node state (e.g. `pve-config-backup.sh`, which backs up each node's distinct `/etc/pve`, networking, and cluster membership), installation and scheduling are inherently per-node — there is no single "cluster-wide" run.
+
+`pve-config-backup.sh` is also the reference implementation for the advanced credential/settings/self-install idioms (PATTERNS.md 14–17). It was deliberately used as the proving ground for sealed credentials before any decision to promote those helpers (e.g. for sealing Gotify tokens) into `script-template.sh` and the other scripts.

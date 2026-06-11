@@ -324,15 +324,113 @@ GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 
 ---
 
+<details>
+<summary><strong>pve-config-backup</strong> — Back up Proxmox VE host configuration (the gap PBS/vzdump leave)</summary>
+
+<br>
+
+Proxmox Backup Server and vzdump protect your **guests** (VMs/CTs) — not the **host** itself. If a node's system disk dies, those guest backups don't bring back `/etc/pve`, your networking, storage definitions, cluster membership, users, or apt sources, so recovery means a full reinstall and rebuild from memory. This script captures all of that host-side config into a single dated, `chmod 600` archive so a dead node is a restore, not a reverse-engineering project. It backs up **configuration only — no guest disk images** — so it's safe to run live on a busy node. Runs on a **Proxmox host** (root).
+
+**Features:**
+- Captures `/etc/pve` plus the pmxcfs backing database (`/var/lib/pve-cluster/config.db`), networking, storage and cluster config, users, apt sources, host cron, and anything you add via `EXTRA_PATHS`
+- Staging-copy approach (`cp -a`) avoids live-FS read races and preserves permissions; the final archive is `chmod 600` because it contains `/etc/shadow` hashes and SSH host keys
+- `MANIFEST.txt` written inside every archive listing included and skipped paths
+- Prefix-scoped retention — only ever prunes its own archives, never a blind `rm`
+- **Offsite export** to SCP/SFTP (key-based), NFS, and FTP/FTPS. Each target is verified the moment you add it by **writing, reading back, and deleting a test file**, with per-step pass/fail feedback — a bad target is never saved
+- **Sealed credentials** — FTP passwords and the Gotify token are sealed with `systemd-creds` (TPM-bound where the host has a TPM, host-key-bound otherwise), falling back to a `chmod 600` file when `systemd-creds` is unavailable. No plaintext secret is written to disk, and credentials never live in the script
+- **Guided one-time setup** (`--setup`, a menu item, or auto-offered on first run): takes the first backup, then optionally walks you through an export target, Gotify, and a schedule — after that it runs hands-off and the only thing you return for is a restore
+- **Self-installs** to `/usr/local/bin` (offered once at startup if you ran it from elsewhere) so the cron path resolves; scheduling is gated on being installed
+- **Guided restore** (`--restore <file>`) extracts to a review directory and prints the exact pmxcfs / `config.db` recovery procedure — it never overwrites anything in `/etc` automatically
+- Cluster-aware — detects corosync config and tailors restore guidance for single-node rebuild vs. cluster rejoin
+- Gotify notification on backup success/failure (cron mode), `--test-notify`
+- Non-interactive credential provisioning (`--set-cred`) for automation — seal a secret from stdin with no plaintext on disk
+- CTRL+C safe — no partial/corrupt archive left behind
+
+**Install:**
+
+```bash
+wget -O /usr/local/bin/pve-config-backup https://raw.githubusercontent.com/SunBroLynk/Proxmox-Scripts/main/pve-config-backup.sh
+chmod +x /usr/local/bin/pve-config-backup
+```
+
+Each node's host config is separate, so for clusters run it (and schedule it) on every node:
+
+```bash
+for node in node1-ip node2-ip node3-ip; do
+    scp /usr/local/bin/pve-config-backup root@${node}:/usr/local/bin/
+done
+```
+
+**Usage:**
+
+```bash
+sudo pve-config-backup                    # Interactive menu (auto-offers guided setup on first run)
+sudo pve-config-backup --setup            # Guided one-time setup (backup + export + Gotify + schedule)
+sudo pve-config-backup -y                 # Back up without prompts (for cron)
+sudo pve-config-backup --cron             # Same as -y; fires Gotify if configured
+sudo pve-config-backup --targets          # Add / test / remove export targets (NFS/SFTP/FTPS)
+sudo pve-config-backup --list             # List archives with sizes and dates
+sudo pve-config-backup --restore <file>   # Guided restore (extract + step-by-step instructions)
+sudo pve-config-backup --status           # Last backup, configured targets, schedule
+sudo pve-config-backup --set-cred <name>  # Seal a secret read from stdin (automation)
+sudo pve-config-backup --test-notify      # Test Gotify notification
+sudo pve-config-backup --schedule         # Set up, change, or remove cron schedule
+sudo pve-config-backup -h                 # Full man-style help with config line numbers
+sudo pve-config-backup -V                 # Show version
+```
+
+Seal a credential non-interactively (e.g. for provisioning):
+
+```bash
+echo -n "$GOTIFY_TOKEN" | sudo pve-config-backup --set-cred gotify-token
+```
+
+**Configuration:**
+
+```bash
+BACKUP_DEST="/var/backups/pve-config"                # Local directory to store archives
+RETENTION_DAYS=30                                    # Prune our own archives older than N days (0 = keep all)
+REMOTE_TARGETS=""                                    # Simple key-based SCP/SFTP targets, space-separated
+                                                     #   e.g. "root@192.168.1.10:/mnt/backup"
+TARGETS_FILE="/etc/pve-config-backup/targets.conf"   # Managed (chmod 600) NFS/FTP target store (--targets)
+INCLUDE_SHADOW=true                                  # Include /etc/shadow + /etc/gshadow (password hashes)
+INCLUDE_SSH_HOST_KEYS=true                           # Include /etc/ssh (host keys + sshd_config)
+EXTRA_PATHS=""                                        # Extra files/dirs to include, space-separated
+GOTIFY_URL=""                                        # Gotify server URL (optional)
+GOTIFY_TOKEN=""                                      # Gotify application token (optional; or seal via --set-cred)
+GOTIFY_PRIORITY=5                                    # Notification priority (1-10)
+LOG_FILE="/var/log/pve-config-backup.log"             # Log file for cron mode
+```
+
+NFS and FTP/FTPS targets (and any credentials) are managed via `--targets` and stored in `TARGETS_FILE` (chmod 600) with passwords sealed — never in this script.
+
+**Requirements:**
+- Proxmox VE host, root access (sudo)
+- `tar`, `gzip` (present on Proxmox)
+- `nfs-common` for NFS targets (the script offers to install it), `curl` for FTP/FTPS and Gotify (present on Proxmox)
+- `systemd-creds` for sealed credentials (present on Proxmox VE 8/9; falls back to a `chmod 600` file if absent)
+
+**What it captures:**
+`/etc/pve` (guest configs, `storage.cfg`, firewall, HA, replication) and `config.db`, `/etc/network/interfaces` (+ `interfaces.d`), `/etc/hostname`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/passwd`, `/etc/group`, apt sources, `/etc/vzdump.conf`, `/etc/lvm/lvm.conf`, `/etc/cron.d`, `/etc/corosync` (clustered nodes), `/etc/shadow` + `/etc/ssh` (toggleable), and anything in `EXTRA_PATHS`.
+
+> [!NOTE]
+> Archives contain secrets (password hashes, SSH host keys) and are written `chmod 600` — treat them as sensitive. Credential sealing protects against leak/copy/exfil (and, with a TPM, against decrypting the secret on another machine); it does **not** protect a secret from an attacker who already has root on the host, since cron must auto-unseal it. The strongest option is to prefer SFTP (SSH keys) or NFS for export, where there's no password to store at all.
+
+</details>
+
+---
+
 ## Scheduling
 
-Scripts that benefit from automation (update-traefik, pihole-sync, nfs-watchdog) include a **built-in cron scheduler**. You don't need to know cron syntax — just run:
+Scripts that benefit from automation (update-traefik, pihole-sync, nfs-watchdog, pve-config-backup) include a **built-in cron scheduler**. You don't need to know cron syntax — just run:
 
 ```bash
 sudo <script-name> --schedule
 ```
 
 Or select **"Manage cron schedule"** from the interactive menu. Pick a frequency (every 5 minutes, hourly, daily, weekly, or custom), and the script writes the crontab entry for you. Come back anytime to change or remove it.
+
+`pve-config-backup` goes a step further with a **guided one-time setup** (`sudo pve-config-backup --setup`, or auto-offered on first run) that chains the first backup, an optional export target, optional Gotify, and the schedule into a single pass — so a fresh install can be made fully hands-off in one sitting.
 
 ## Notifications
 
@@ -343,6 +441,8 @@ sudo <script-name> --test-notify
 ```
 
 Notifications are only sent in automated/cron mode. Interactive use shows results directly in the terminal.
+
+`pve-config-backup` can additionally **seal** its Gotify token (and FTP passwords) with `systemd-creds` instead of keeping them in the config block — see its section above and [`SECURITY.md`](SECURITY.md).
 
 ---
 

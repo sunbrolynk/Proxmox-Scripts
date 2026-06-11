@@ -95,7 +95,7 @@ while IFS= read -r line; do
 done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|...exclusions...' | head -N)
 ```
 
-**Adjust the `grep -v` exclusion list per script** so it shows only the user-facing CONFIG variables, not the color vars, metadata, or internal state flags. Common exclusions: `SCRIPT_`, the color vars, `TAB`, `TEMP_FILES`, and runtime flags like `INTERACTIVE`, `AUTO_YES`, `DRY_RUN`. Requires `SCRIPT_PATH="$(readlink -f "$0")"` in the metadata block.
+**Adjust the `grep -v` exclusion list per script** so it shows only the user-facing CONFIG variables, not the color vars, metadata, or internal state flags. Common exclusions: `SCRIPT_`, the color vars, `TAB`, `TEMP_FILES`, and runtime flags like `INTERACTIVE`, `AUTO_YES`, `DRY_RUN`. Internal path/state vars that aren't meant to be edited (e.g. `SETTINGS_FILE`, `SECRETS_DIR`, `INSTALL_NUDGE_DISMISSED`) should also be excluded so the table stays focused. Requires `SCRIPT_PATH="$(readlink -f "$0")"` in the metadata block.
 
 ---
 
@@ -115,7 +115,7 @@ for arg in "${@:-}"; do
 done
 ```
 
-Action flags (`--yes`, `--dry-run`, mode toggles) are parsed later in a separate loop that also sets `INTERACTIVE=false`.
+Action flags (`--yes`, `--dry-run`, mode toggles) are parsed later in a separate loop that also sets `INTERACTIVE=false`. Note: flags that need root or take an argument (e.g. `--restore <file>`, `--set-cred <name>`, `--targets`) still dispatch in this loop but do their own root check inline and read `${ARGS[$((i+1))]}` for the argument — use an indexed `while` loop over `ARGS` rather than `for arg` when you need the next token.
 
 ---
 
@@ -171,6 +171,8 @@ CURLEOF
 
 Messages are markdown — use `###` headers, `**bold**`, `` `code` ``, and tables. Only send in automated/cron mode, never interactively. Priority 8 for failures/alerts, default (5) for success.
 
+> When a script also seals secrets (pattern 14), resolve the token through the seal layer instead of reading `GOTIFY_TOKEN` directly — see the `resolve_gotify_token` note in pattern 14.
+
 ---
 
 ## 9. Cron schedule manager
@@ -185,7 +187,7 @@ CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
 (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "$NEW_CRON") | crontab -
 ```
 
-Cron command form: `/usr/local/bin/${SCRIPT_NAME} -y >> ${LOG_FILE} 2>&1` (or `--cron` for scripts that distinguish).
+Cron command form: `/usr/local/bin/${SCRIPT_NAME} -y >> ${LOG_FILE} 2>&1` (or `--cron` for scripts that distinguish). Because cron runs that absolute path, a script that self-installs (pattern 17) should derive the cron command from its `SCRIPT_INSTALL_DEST` var so the scheduled path and the install target can never drift apart, and should gate scheduling on actually being installed there.
 
 ---
 
@@ -273,7 +275,155 @@ for node in node1-ip node2-ip node3-ip; do
 done
 ```
 
-Document this in the script's README section. Cron (if used) must be set per-node.
+Document this in the script's README section. Cron (if used) must be set per-node. For host-config backups, this is not optional: each node's config is distinct, so the script must be installed and scheduled on every node independently.
+
+---
+
+## 14. Sealed credentials (systemd-creds + chmod-600 fallback)
+
+When a script must store a secret it has to **replay later** (an FTP password, a Gotify token used unattended by cron), hashing is not an option — replay requires the plaintext, which means reversible storage. Seal it instead of writing it plaintext, and never put it in the script.
+
+```bash
+SECRETS_DIR="/etc/<script>/secrets"   # chmod 700
+
+have_systemd_creds() { command -v systemd-creds &>/dev/null; }
+
+# Seal a secret (value on stdin) under a logical name. Echoes the method used.
+secret_set() {
+    local name="$1" value; value="$(cat)"
+    mkdir -p "$SECRETS_DIR"; chmod 700 "$SECRETS_DIR"
+    if have_systemd_creds; then
+        if printf '%s' "$value" | systemd-creds encrypt --name="pfx-${name}" - "${SECRETS_DIR}/${name}.cred" 2>/dev/null; then
+            chmod 600 "${SECRETS_DIR}/${name}.cred"; rm -f "${SECRETS_DIR}/${name}.secret" 2>/dev/null || true
+            echo "systemd-creds"; return 0
+        fi
+    fi
+    printf '%s' "$value" > "${SECRETS_DIR}/${name}.secret"; chmod 600 "${SECRETS_DIR}/${name}.secret"
+    rm -f "${SECRETS_DIR}/${name}.cred" 2>/dev/null || true
+    echo "file-600"; return 0
+}
+
+# Unseal to stdout; non-zero if absent.
+secret_get() {
+    local name="$1"
+    if [[ -f "${SECRETS_DIR}/${name}.cred" ]] && have_systemd_creds; then
+        systemd-creds decrypt --name="pfx-${name}" "${SECRETS_DIR}/${name}.cred" - 2>/dev/null && return 0
+    fi
+    [[ -f "${SECRETS_DIR}/${name}.secret" ]] && { cat "${SECRETS_DIR}/${name}.secret"; return 0; }
+    return 1
+}
+
+secret_exists() { [[ -f "${SECRETS_DIR}/$1.cred" || -f "${SECRETS_DIR}/$1.secret" ]]; }
+secret_method() { [[ -f "${SECRETS_DIR}/$1.cred" ]] && echo "systemd-creds (sealed)" || { [[ -f "${SECRETS_DIR}/$1.secret" ]] && echo "file-600" || echo "none"; }; }
+secret_delete() { rm -f "${SECRETS_DIR}/$1.cred" "${SECRETS_DIR}/$1.secret" 2>/dev/null || true; }
+```
+
+- `systemd-creds` seals TPM-bound where a TPM exists (the blob can't be decrypted on another machine), host-key-bound otherwise. Both fall back to a `chmod 600` file when `systemd-creds` is absent, so cron can still auto-unseal.
+- **Resolve sealed-first.** Where a value could be sealed or set as a plaintext config var, prefer the seal: `resolve_gotify_token() { secret_exists gotify-token && secret_get gotify-token || printf '%s' "$GOTIFY_TOKEN"; }`. The Gotify sender (pattern 8) then uses the resolved value.
+- **Store references, not literals.** For per-item secrets (e.g. one FTP password per export target), seal under a generated id and store `@SECRET:<id>` in the target spec — never the password. Resolve at use time: `[[ "$field" == @SECRET:* ]] && secret_get "${field#@SECRET:}" || printf '%s' "$field"`. Bonus: this sidesteps delimiter-in-password parsing bugs, since the literal never enters the delimited file.
+- **Honest scope (document it):** sealing protects against leak/copy/exfil and (with a TPM) offline cracking elsewhere. It does **not** protect a secret from an attacker who already has root on the host, because cron must auto-unseal. The strongest option is credential-*less* transports (SSH keys, NFS) where there is no secret to store. Warn hard on plaintext-only transports like FTP.
+- `--set-cred <name>` provides a non-interactive path: read the value from stdin (pipe) or a hidden TTY prompt, seal it, report the method. Lets users provision without the wizard.
+
+---
+
+## 15. Managed settings file (parsed, not sourced)
+
+A guided setup (pattern 17) needs to persist non-secret choices (a Gotify URL, a dismissal flag) so the script is "set up once." Keep the script standalone — the file is optional and the script runs fine without it — but **parse a whitelist of keys; never `source` it.** Sourcing an attacker-writable file is code execution; parsing is not.
+
+```bash
+SETTINGS_FILE="/etc/<script>/config.env"   # chmod 600, optional
+
+load_settings() {
+    [[ -f "$SETTINGS_FILE" ]] || return 0
+    local line key val
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        key="${line%%=*}"; val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
+        case "$key" in
+            GOTIFY_URL) GOTIFY_URL="$val" ;;
+            RETENTION_DAYS) RETENTION_DAYS="$val" ;;
+            INSTALL_NUDGE_DISMISSED) INSTALL_NUDGE_DISMISSED="$val" ;;
+            # ...only the keys you explicitly expect...
+        esac
+    done < "$SETTINGS_FILE"
+}
+
+settings_set() {   # upsert one whitelisted key
+    local key="$1" val="$2" tmp
+    mkdir -p "$(dirname "$SETTINGS_FILE")"; chmod 700 "$(dirname "$SETTINGS_FILE")"
+    touch "$SETTINGS_FILE"; chmod 600 "$SETTINGS_FILE"
+    tmp=$(mktemp /tmp/.set-XXXXXX); TEMP_FILES+=("$tmp")
+    grep -v "^${key}=" "$SETTINGS_FILE" > "$tmp" 2>/dev/null || true
+    echo "${key}=\"${val}\"" >> "$tmp"; cat "$tmp" > "$SETTINGS_FILE"; chmod 600 "$SETTINGS_FILE"; rm -f "$tmp"
+}
+```
+
+Call `load_settings` early in MAIN (after defaults are defined, before they're used). Any key not in the `case` whitelist is silently ignored — a planted `EVIL=...` line does nothing. Initialize whitelisted runtime vars (e.g. `INSTALL_NUDGE_DISMISSED=""`) before `load_settings` so they're defined under `set -u`, and exclude them from the dynamic config table (pattern 5).
+
+---
+
+## 16. Export target with live verification (write → read → delete)
+
+When a script saves a remote destination (NFS export, SFTP/FTPS server), verify it the moment it's added by actually round-tripping a canary file, with per-step feedback. A target that can't be written/read/deleted is never saved — the user finds out at add-time, not at 3 AM when the backup silently fails.
+
+```bash
+verify_target() {           # dispatch on type prefix in the pipe-delimited spec
+    local spec="$1" canary; canary="/tmp/.canary-$$-$RANDOM"
+    echo "verify-$(date +%s)" > "$canary"; TEMP_FILES+=("$canary")
+    case "${spec%%|*}" in
+        nfs)  verify_nfs  ... "$canary" ;;
+        sftp) verify_sftp ... "$canary" ;;
+        ftp)  verify_ftp  ... "$canary" ;;
+    esac
+}
+# Each verify_* does, with a ✓/✗ per step:
+#   1) write the canary to the remote
+#   2) read it back and compare contents
+#   3) delete it from the remote
+# Return non-zero on any failure so the caller refuses to save the target.
+```
+
+- Store verified targets in a `chmod 600` `TARGETS_FILE`, one pipe-delimited spec per line (`nfs|host:/export|subdir`, `sftp|user@host|port|path`, `ftp|host|port|user|@SECRET:<id>|path|tls`).
+- For credentialed transports, seal the secret (pattern 14) and store only the `@SECRET:<id>` reference in the spec.
+- On removal, also `secret_delete` any referenced credential so nothing is orphaned.
+- Prefer key-based/credential-less transports; if offering FTP, default to FTPS and warn hard before saving a plaintext-FTP target.
+
+---
+
+## 17. Guided setup + self-install (run-once UX)
+
+For a script meant to run unattended forever after, give it a one-time wizard and let it install itself to the canonical path so cron resolves.
+
+```bash
+SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # metadata block; cron runs THIS path
+
+installed_ok() { [[ -f "$SCRIPT_INSTALL_DEST" && -x "$SCRIPT_INSTALL_DEST" ]]; }
+
+install_self() {   # copy + chmod 755; handle the already-at-dest case
+    if [[ "$SCRIPT_PATH" == "$SCRIPT_INSTALL_DEST" ]]; then chmod 755 "$SCRIPT_INSTALL_DEST" 2>/dev/null || true; return 0; fi
+    cp "$SCRIPT_PATH" "$SCRIPT_INSTALL_DEST" 2>/dev/null && chmod 755 "$SCRIPT_INSTALL_DEST"
+}
+
+# Offer once at startup (interactive). Decline is remembered via settings (pattern 15)
+# so it never nags again; scheduling stays disabled until installed.
+offer_install_at_startup() {
+    installed_ok && return 0
+    [[ "$INSTALL_NUDGE_DISMISSED" == "1" ]] && return 0
+    read -rp "  Install to ${SCRIPT_INSTALL_DEST} now? [Y/n]: " a
+    if [[ ! "$a" =~ ^[Nn]$ ]]; then install_self || true
+    else settings_set INSTALL_NUDGE_DISMISSED "1"; INSTALL_NUDGE_DISMISSED="1"; fi
+}
+
+# Gate every scheduling entry point (--schedule, menu, setup step) on being installed,
+# re-offering inline (the user actively chose to schedule = they want it installed).
+require_installed_for_schedule() {
+    installed_ok && return 0
+    read -rp "  Scheduling needs the script at ${SCRIPT_INSTALL_DEST}. Install now? [Y/n]: " a
+    [[ ! "$a" =~ ^[Nn]$ ]] && install_self
+}
+```
+
+Guided setup (`--setup`, a menu item, and auto-offered when `is_first_run` detects nothing configured) runs the **mandatory** step first (the actual backup/sync), then walks **optional** steps (export target, notifications, schedule) each individually skippable. Do **not** re-exec after self-install — the running instance finishes from wherever it launched; the installed copy is what cron uses going forward. Re-execing into the new path is the kind of cleverness that causes subtle bugs.
 
 ---
 
@@ -285,9 +435,14 @@ Document this in the script's README section. Cron (if used) must be set per-nod
 - [ ] Man-style help with dynamic config table (5), exclusions tuned
 - [ ] Early-exit dispatch for info flags (6)
 - [ ] Interactive menu mirroring all flags (7)
-- [ ] Secure Gotify + test_gotify if notifications apply (8)
-- [ ] Cron manager if scheduling applies (9)
+- [ ] Secure Gotify + test_gotify if notifications apply (8); resolve sealed-first if sealing (14)
+- [ ] Cron manager if scheduling applies (9); gate on install if self-installing (17)
 - [ ] Parallel for independent multi-target work (10)
 - [ ] Checksum verification for downloads (11)
 - [ ] Backup + rollback for destructive changes (12)
+- [ ] Cluster deployment documented for host scripts (13)
+- [ ] Sealed credentials instead of plaintext where a secret must be replayed (14)
+- [ ] Managed settings parsed-not-sourced if persisting choices (15)
+- [ ] Live write/read/delete verification for saved remote targets (16)
+- [ ] Guided setup + self-install for run-once unattended tools (17)
 - [ ] README `<details>` section + CLAUDE.md table + TODO.md entry

@@ -18,6 +18,12 @@ Every script and PR is reviewed against the checklist below before being merged.
 - No credentials in comments, even as examples with real-looking values
 - Sensitive values must be in configurable variables with placeholder text
 - `.env` files, key files, and certificates are covered by `.gitignore`
+- **Prefer credential-less transports.** Where a script connects to a remote (backup export, sync target), favor SSH keys or NFS — mechanisms with no password to store — over anything that requires a stored secret.
+- **Seal secrets that must be replayed.** Some secrets can't be hashed because the script has to send the original later (an FTP password, a Gotify token used by cron). These must be **sealed**, not stored plaintext and not embedded in the script:
+  - Use `systemd-creds` to seal (TPM-bound where the host has a TPM — the blob can't be decrypted on another machine; host-key-bound otherwise). Fall back to a `chmod 600` file only when `systemd-creds` is unavailable, so unattended cron can still unseal.
+  - Store a **reference** (e.g. `@SECRET:<id>`) in any config/target file — never the literal secret. Resolve it at use time. Delete the sealed secret when its referencing entry is removed.
+  - Secret files live in a `chmod 700` directory; sealed blobs and fallback files are `chmod 600`.
+  - **Be honest about the threat model in user-facing docs.** Sealing protects against leak, copy, and exfiltration (and, with a TPM, against decrypting elsewhere). It does **not** protect a secret from an attacker who already has root on the host, because the script/cron must be able to auto-unseal. Plaintext-only transports like FTP must carry a hard warning before a credentialed target is saved.
 
 ### Code Transparency
 - No obfuscated, minified, or encoded code
@@ -39,8 +45,10 @@ Every script and PR is reviewed against the checklist below before being merged.
 - Temp files must be in `/tmp` with unique names
 - Temp files must be cleaned up on exit (including CTRL+C)
 - No following symlinks into unexpected locations
-- Explicit file permissions (755 for binaries, 600 for secrets, never 777)
+- Explicit file permissions (755 for binaries, 600 for secrets, 700 for secret dirs, never 777)
 - No recursive `chmod` or `chown` on system directories
+- **Never `source` a runtime/settings file.** A script may read its own managed settings file, but it must **parse a whitelist of expected keys**, never `source` it — sourcing a writable file is arbitrary code execution. Unknown keys are ignored.
+- Archives that contain secrets (e.g. a host-config backup including `/etc/shadow` or SSH host keys) must be written `chmod 600`, and the docs must tell users to treat them as sensitive.
 
 ### Execution Safety
 - No spawning background processes without user knowledge
@@ -48,6 +56,7 @@ Every script and PR is reviewed against the checklist below before being merged.
 - No modifying PATH, bashrc, profile, or other shell configs
 - No killing processes outside the script's scope
 - Proper quoting of all variables to prevent word splitting and globbing
+- A script that installs itself to `/usr/local/bin` must do so only with explicit user consent (an interactive offer), copy verbatim, set `755`, and never re-exec silently.
 
 ### Privilege Safety
 - Scripts requiring root must check and declare it upfront
@@ -71,6 +80,8 @@ These are patterns that have been seen in malicious scripts submitted to open-so
 | **Hidden processes** | Forking to background with `&`, `nohup`, `disown`, `screen`, `tmux` | Search for backgrounding commands |
 | **Reverse shells** | Establishing outbound connections for remote access | Search for `/dev/tcp`, `nc -e`, `bash -i`, `python -c` socket patterns |
 | **Crypto miners** | Downloading and running mining software | Check all downloaded binaries against expected checksums |
+| **Config-file sourcing** | `source`-ing a writable settings/state file → arbitrary code execution | Ensure settings files are parsed against a key whitelist, never `source`d |
+| **Plaintext secret storage** | Writing tokens/passwords to disk or into the script in cleartext | Require sealing (systemd-creds / chmod-600), references not literals, credential-less transports where possible |
 
 ## Findings Log
 
@@ -88,3 +99,4 @@ Document any suspicious patterns or notable security findings from PR reviews he
 4. **Don't assume** — check if files exist before reading, check if commands exist before running
 5. **Quote everything** — `"$variable"` not `$variable`
 6. **Use official sources** — when in doubt, link to the upstream project's GitHub releases page
+7. **Don't store what you don't have to** — prefer SSH keys/NFS over stored passwords; if you must store a replayable secret, seal it and be honest in the docs about what sealing does and doesn't protect against
