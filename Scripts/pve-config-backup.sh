@@ -67,7 +67,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pve-config-backup"
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"  # Canonical location (cron runs this path)
@@ -218,7 +218,7 @@ show_help() {
         val=$(echo "$line" | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '"' | xargs)
         printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
     done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" \
-        | grep -v 'SCRIPT_\|BACKUP_PATHS\|SETTINGS_FILE\|SECRETS_DIR\|INSTALL_NUDGE_DISMISSED\|ARCHIVE_PATH\|ARCHIVE_SIZE\|SKIPPED_PATHS\|^[0-9]*:ARGS=\|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|INTERACTIVE\|AUTO_YES' \
+        | grep -v 'SCRIPT_\|BACKUP_PATHS\|SETTINGS_FILE\|SECRETS_DIR\|INSTALL_NUDGE_DISMISSED\|ARCHIVE_PATH\|ARCHIVE_SIZE\|SKIPPED_PATHS\|^[0-9]*:ARGS=\|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|INTERACTIVE\|AUTO_YES\|^[0-9]*:SETUP=' \
         | head -12)
     echo ""
     echo -e "${BD}FILES${CL}"
