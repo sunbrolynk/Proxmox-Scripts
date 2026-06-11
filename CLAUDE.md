@@ -14,6 +14,12 @@ This file provides context for AI assistants (Claude, Copilot, etc.) working on 
 - Primary users: The owner and a small group of trusted homelab/ISP professionals
 - Environment: Proxmox VE, Mikrotik RouterOS, UniFi networking, Docker, self-hosted services
 
+## CRITICAL: Standalone Scripts
+
+**Every script is fully standalone.** Users deploy by `wget`-ing a single `.sh` file and running it. Scripts must NEVER depend on a shared library, external file, or anything else being present on the system. All functions are inline in each script, even though this means duplication across scripts. This is intentional — it's the right tradeoff for single-file `wget`-and-run tools. Do not propose a shared library unless the repo grows to 10+ scripts AND the owner explicitly asks.
+
+To keep duplicated functions consistent across scripts, use `script-template.sh` and `PATTERNS.md` (both in the repo) as the source of truth. When updating a common function, update the template/patterns first, then propagate to each script.
+
 ## Script Standards
 
 All scripts in this repo must follow these conventions:
@@ -21,49 +27,81 @@ All scripts in this repo must follow these conventions:
 ### Structure
 - Shebang: `#!/usr/bin/env bash`
 - Strict mode: `set -euo pipefail` with `shopt -s inherit_errexit nullglob`
-- Configuration variables at the TOP of the script in a clearly labeled block
+- Configuration variables at the TOP in a clearly labeled block, with inline `# comments`
+- Script metadata block: `SCRIPT_NAME`, `SCRIPT_VERSION`, `SCRIPT_URL`, `SCRIPT_PATH`
 - No hardcoded IPs, domains, usernames, passwords, API keys, or secrets anywhere
+- Generic placeholder defaults in config (e.g. `192.168.1.2`, `root`), never the owner's real values
 - User-adjustable values must be variables, not buried in code
 
-### Output Style (matches Proxmox Community Scripts)
+### Colors (ALWAYS use $'...' syntax)
 ```bash
-# Colors (use $'...' syntax for proper escape handling)
 RD=$'\033[01;31m'   # Red — errors
 YW=$'\033[33m'      # Yellow — warnings, in-progress
 GN=$'\033[1;92m'    # Green — success
 BL=$'\033[36m'      # Blue/Cyan — info, headers
 BD=$'\033[1m'       # Bold — section headers
 CL=$'\033[m'        # Clear
+BFR=$'\r\033[K'     # Carriage return + clear line (for msg_ok overwrite)
+```
+**Never use `$(echo "\033...")`** — it doesn't interpret escapes when output via `cat` in heredocs. The `$'...'` form interprets at parse time so colors render correctly everywhere (echo, cat, printf).
 
-# Message functions
-msg_info()  — yellow, with trailing "..."
-msg_ok()    — green checkmark ✓
+### Message Functions (standard across all scripts)
+```bash
+msg_info()  — yellow, trailing "...", no newline (echo -ne)
+msg_ok()    — green checkmark ✓, uses ${BFR} to overwrite the msg_info line
 msg_error() — red cross ✗
 msg_warn()  — blue info ℹ
 ```
 
-### Required Features
-- **CTRL+C trap** — graceful exit, cleanup temp files, inform user no changes were made
-- **Preflight checks** — verify dependencies BEFORE showing menu or doing work
-- **Interactive prompts** — offer to fix problems (install packages, start services)
-- **Automatic backups** — before modifying binaries or configs
-- **Rollback on failure** — if an update breaks a service, restore the backup automatically
-- **Clear error messages** — tell the user WHAT failed and HOW to fix it manually
-- **Summary on completion** — show final versions, URLs, status
+### Headers / Banners
+Every script's `header_info()` shows the shared repo banner FIRST, then script-specific ASCII art below it:
+```
+  ___                              
+ | _ \_ _ _____ ___ __  _____ __  
+ |  _/ '_/ _ \ \ / '  \/ _ \ \ / 
+ |_| |_| \___/_\_\_|_|_\___/_\_\  
+      ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+          S c r i p t s
+```
+Generate per-script art (figlet-style) that represents the script's purpose. Keep it small (4-5 lines).
 
-### Flow Pattern (for complex interactive scripts)
-1. Early exit for `--help` / `-h` (before any checks)
-2. ASCII art header
+### Man-Style Help (show_help function)
+Full man-page sections in this order: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, CONFIGURATION, FILES, EXIT STATUS, EXAMPLES, SEE ALSO, LICENSE. The CONFIGURATION section dynamically prints each config variable WITH ITS LINE NUMBER pulled from the script at runtime (see PATTERNS.md "dynamic config help"). This lets users find exactly what to edit.
+
+### Required Features
+- **`-h`/`--help`** man-style help (early exit, before any checks)
+- **`-V`/`--version`** prints name + version + URL
+- **CTRL+C trap** — graceful exit, cleanup temp files, inform user no changes were made
+- **Root check** — if the script needs root
+- **Preflight checks** — verify dependencies BEFORE the menu or work
+- **Interactive menu** — when run with no args; every flag should also be a menu option
+- **Interactive prompts** — offer to fix problems (install packages, start services)
+- **Automatic backups + rollback** — before modifying binaries/configs; auto-restore on failure
+- **Clear error messages** — tell the user WHAT failed and HOW to fix it manually
+- **Summary on completion** — final versions, URLs, status
+
+### Parallel by Default
+When an operation runs across multiple independent targets (mounts, hosts, containers), run them in PARALLEL using background jobs + temp-file result collection, not a sequential loop. Single-target keeps live output; multi-target forks and collects. See PATTERNS.md "parallel execution". Exception: operations that must be sequential for safety (e.g. remounts, anything that competes for a shared lock).
+
+### Scheduling & Notifications (where it makes sense)
+- Scripts that benefit from automation include `--schedule` (interactive cron manager — user picks frequency, no cron knowledge needed) and `--cron`/`-y` for unattended runs.
+- Optional Gotify notifications via `GOTIFY_URL`/`GOTIFY_TOKEN`/`GOTIFY_PRIORITY` config vars + `--test-notify` flag. Markdown-formatted messages with tables. Only fire in automated/cron mode, silent interactively.
+- **Secure Gotify**: never put the token in the URL (`?token=`) — it leaks in `ps aux`. Use a temp curl config file (chmod 600) with an `X-Gotify-Key` header. See PATTERNS.md "secure gotify".
+- Not every script needs notifications. A purely manual tool (e.g. pct-force-destroy) doesn't.
+
+### Flow Pattern (complex interactive scripts)
+1. Early exit for `--help`/`-h`, `--version`/`-V`, and read-only info flags (`--status`, `--test-notify`, `--schedule`)
+2. ASCII header (repo banner + script art)
 3. Root check
-4. Internet connectivity check
-5. Environment checks (OS, architecture, disk, memory)
+4. Internet connectivity check (if it downloads anything)
+5. Environment checks (OS, kernel, arch, platform, disk, memory, language runtimes)
 6. Preflight dependency checks (with interactive fix)
 7. Status display (current vs available versions)
 8. Interactive menu (or non-interactive via flags)
-9. Perform updates/changes
-10. Summary with service URLs
+9. Perform updates/changes (parallel where applicable)
+10. Summary with service URLs + optional Gotify notification
 
-### Flow Pattern (for simple utility scripts)
+### Flow Pattern (simple utility scripts)
 1. Help / version flags
 2. Root check
 3. Input validation
@@ -71,53 +109,66 @@ msg_warn()  — blue info ℹ
 5. Perform the action with clear step-by-step output
 6. Success or failure message with next steps
 
-## Code Review Checklist
+## Building a New Script
 
-When reviewing contributions or PRs, verify:
+1. Copy `script-template.sh` as the starting skeleton.
+2. Pull the exact idioms (dynamic config help, parallel block, secure Gotify, cron manager, interactive menu) from `PATTERNS.md`.
+3. Fill in config block, metadata, header art, preflight, and the core logic.
+4. Add a collapsible `<details>` section to README.md.
+5. Add the script to the table in this file and to TODO.md with a feature checklist.
+6. Sanitize: generic placeholder defaults, no owner-specific IPs/domains.
+7. Run through the Code Review Checklist below before considering it done.
+
+## Code Review Checklist
 
 ### Security (CRITICAL)
 - [ ] No hardcoded credentials, tokens, keys, or secrets
-- [ ] No obfuscated or minified code — every line must be readable
+- [ ] Gotify tokens never in URLs/process args (use curl config file + header)
+- [ ] No obfuscated or minified code — every line readable
 - [ ] No `curl | bash` or `wget | sh` from untrusted external sources
 - [ ] No phone-home, telemetry, or analytics
-- [ ] No unnecessary network requests
-- [ ] Downloads only from verified sources (official GitHub releases, distro package repos)
+- [ ] Downloads only from verified sources (official GitHub releases, distro repos)
+- [ ] Checksum verification for downloaded binaries where the upstream publishes them
 - [ ] No modification of system files outside the script's declared scope
 - [ ] No privilege escalation beyond what's needed
-- [ ] No writing to unexpected directories
-- [ ] No background processes spawned without user knowledge
+- [ ] No background processes spawned without user knowledge (parallel jobs the script manages and waits on are fine)
 - [ ] No use of `eval` with user-supplied or external input
-- [ ] No shell injection vectors (unquoted variables in commands)
-- [ ] Temp files created in /tmp with unique names and cleaned up on exit
-- [ ] File permissions set explicitly (especially for downloaded binaries: 755, not 777)
+- [ ] No shell injection vectors (quote all variables: `"$var"`)
+- [ ] Input validation on user-provided paths/IDs/URLs
+- [ ] Temp files in /tmp with `mktemp` unique names, cleaned up on exit (incl. CTRL+C)
+- [ ] File permissions set explicitly (755 binaries, 600 secrets, never 777)
 
 ### Known Attack Patterns to Watch For
 - **Typosquatting in URLs** — verify download domains match official sources exactly
-- **Hidden characters** — check for Unicode lookalikes in URLs or commands
-- **Conditional payloads** — code that behaves differently based on hostname, IP, or environment
-- **Delayed execution** — cron jobs, systemd timers, or at jobs added without user consent
+- **Unicode homoglyphs** — check raw bytes, not visual appearance, in URLs/variables
+- **Conditional payloads** — code that behaves differently by hostname, IP, date, or env
+- **Delayed execution** — cron/systemd timers/at jobs added without user consent
 - **Exfiltration** — piping system info, env vars, or file contents to external URLs
 - **Symlink attacks** — following symlinks to overwrite system files
 - **Race conditions** — TOCTOU bugs in temp file handling
-- **Embedded binaries** — base64-encoded blobs decoded and executed at runtime
+- **Embedded binaries** — base64 blobs decoded and executed at runtime
 
 ### Quality
-- [ ] Uses `set -euo pipefail` and proper error handling
-- [ ] CTRL+C handler with cleanup (for scripts that create temp files)
-- [ ] All user-facing strings use color-coded message functions
-- [ ] Configuration block at top with all adjustable variables (where applicable)
-- [ ] No magic numbers — use named variables
-- [ ] Functions are modular and single-purpose
+- [ ] `set -euo pipefail` + `shopt -s inherit_errexit nullglob`
+- [ ] CTRL+C handler with cleanup
+- [ ] Colors use `$'...'` syntax
+- [ ] All user-facing strings use the color-coded message functions
+- [ ] Config block at top with all adjustable variables, commented
+- [ ] Script metadata block present (NAME/VERSION/URL/PATH)
+- [ ] No magic numbers — named variables
+- [ ] Functions modular and single-purpose
+- [ ] Multi-target work runs in parallel
+- [ ] Every flag also reachable via the interactive menu
 - [ ] Comments explain WHY, not just WHAT
 - [ ] Tested on at least one Proxmox environment
 
 ### Documentation
-- [ ] README section for the script with usage, configuration, and requirements
-- [ ] Inline help via `-h` / `--help` flag
-- [ ] Configuration variables are documented with comments
+- [ ] README collapsible `<details>` section with features, install, usage, config, requirements
+- [ ] Man-style `-h`/`--help` with dynamic config line numbers
+- [ ] Config variables documented with inline comments
+- [ ] Added to the Current Scripts table and TODO.md
 
 ## File Naming Convention
-
 - Script files: `kebab-case.sh` (e.g. `update-traefik.sh`, `pct-force-destroy.sh`)
 - Documentation: `UPPERCASE.md` (e.g. `README.md`, `CONTRIBUTING.md`)
 - No spaces in filenames, ever
@@ -128,15 +179,14 @@ When reviewing contributions or PRs, verify:
 |--------|---------|--------|
 | update-traefik.sh | Update Traefik binary and Traefik Manager | Active |
 | pct-force-destroy.sh | Force destroy LXCs with stale NFS locks | Active |
-| pihole-sync.sh | Sync Pi-hole config from primary to backup | Active |
+| pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active |
 | nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active |
 
 ## Architecture Notes
 
-Scripts in this repo target two environments:
+Scripts target two environments:
 
-1. **Inside Proxmox VMs/LXCs** (e.g. update-traefik.sh) — designed to be copied into the guest OS and run locally. These do NOT require Proxmox API access or host-level privileges.
+1. **Inside Proxmox VMs/LXCs** (e.g. update-traefik.sh) — copied into the guest OS and run locally. No Proxmox API access or host privileges needed.
+2. **On Proxmox hosts** (e.g. pct-force-destroy.sh, nfs-watchdog.sh) — run on the node with root. Interact with PVE tools (pct, qm) and cluster filesystem (pmxcfs).
 
-2. **On Proxmox hosts** (e.g. pct-force-destroy.sh) — run directly on the Proxmox node with root access. These interact with PVE tools (pct, qm) and cluster filesystem (pmxcfs).
-
-Scripts should clearly document which environment they target.
+Scripts should clearly document which environment they target. Cluster-host scripts are deployed to all nodes via an `scp` loop.
