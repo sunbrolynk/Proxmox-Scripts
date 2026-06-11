@@ -12,14 +12,23 @@
 #
 # Targets a Proxmox VE HOST (run on the node, as root). It backs up configuration
 # only — no guest disk images — so it is safe to run live on a busy node.
+#
+# Offsite export: archives can be copied to one or more remote targets over
+# SCP/SFTP (key-based, via REMOTE_TARGETS below) or, via the interactive target
+# manager (--targets), to NFS shares and FTP/FTPS servers. Each target you add is
+# verified by writing, reading back, and deleting a test file before it's saved.
 
 # ============================================================
 # CONFIGURATION — adjust these for your setup
 # ============================================================
 BACKUP_DEST="/var/backups/pve-config"   # Local directory to store archives
 RETENTION_DAYS=30                       # Delete our own archives older than N days (0 = keep all)
-REMOTE_TARGETS=""                       # Optional space-separated scp targets, key-based auth
+REMOTE_TARGETS=""                       # Simple key-based SCP/SFTP targets, space-separated.
+                                        #   No secrets — safe to keep here.
                                         #   e.g. "root@192.168.1.10:/mnt/backup root@192.168.1.11:/mnt/backup"
+TARGETS_FILE="/etc/pve-config-backup/targets.conf"  # Managed (chmod 600) store for NFS/FTP targets
+                                        #   and anything with credentials. Add via --targets.
+                                        #   Script runs fine if this file does not exist.
 INCLUDE_SHADOW=true                     # Include /etc/shadow + /etc/gshadow (password hashes)
 INCLUDE_SSH_HOST_KEYS=true              # Include /etc/ssh (host keys + sshd_config)
 EXTRA_PATHS=""                          # Space-separated extra files/dirs to include
@@ -55,7 +64,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pve-config-backup"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 
@@ -72,13 +81,17 @@ CROSS="${RD}✗${CL}"
 INFO="${BL}ℹ${CL}"
 TAB="  "
 
-# Temp tracking — populated as we create staging dirs / partial archives so the
-# CTRL+C trap and normal cleanup can remove them.
+# Temp tracking — populated as we create staging dirs / mountpoints / partial
+# archives so the CTRL+C trap and normal cleanup can remove them.
 TEMP_FILES=()
 
 cleanup() {
     for f in "${TEMP_FILES[@]:-}"; do
-        rm -rf "$f" 2>/dev/null
+        # A leftover NFS mountpoint must be unmounted before removal.
+        if mountpoint -q "$f" 2>/dev/null; then
+            umount "$f" 2>/dev/null || umount -l "$f" 2>/dev/null || true
+        fi
+        rm -rf "$f" 2>/dev/null || true
     done
 }
 
@@ -131,12 +144,21 @@ show_help() {
     echo -e "${TAB}live. Run it on each node; in a cluster, /etc/pve resyncs automatically when"
     echo -e "${TAB}a rebuilt node rejoins, but the per-node files here still need restoring."
     echo ""
+    echo -e "${TAB}${BD}Offsite export:${CL} each archive can be copied to remote targets — SCP/SFTP"
+    echo -e "${TAB}(key-based, via REMOTE_TARGETS), or NFS and FTP/FTPS added interactively with"
+    echo -e "${TAB}${BL}--targets${CL}. Every target is verified (write → read → delete a test file)"
+    echo -e "${TAB}before it is saved."
+    echo ""
     echo -e "${BD}OPTIONS${CL}"
     echo -e "${TAB}${GN}(no arguments)${CL}"
     echo -e "${TAB}${TAB}Launch interactive mode with guided menu."
     echo ""
     echo -e "${TAB}${GN}-y, --yes, --cron${CL}"
     echo -e "${TAB}${TAB}Run a backup without prompts (for cron). Fires Gotify if configured."
+    echo ""
+    echo -e "${TAB}${GN}--targets${CL}"
+    echo -e "${TAB}${TAB}Add, test, list, or remove offsite export targets (NFS / SFTP / FTPS)."
+    echo -e "${TAB}${TAB}Each add is verified by writing, reading back, and deleting a test file."
     echo ""
     echo -e "${TAB}${GN}--list${CL}"
     echo -e "${TAB}${TAB}List existing archives in the backup destination with date and size."
@@ -164,17 +186,17 @@ show_help() {
     echo -e "${TAB}Edit the variables at the top of this script to match your setup."
     echo -e "${TAB}File: ${BL}${SCRIPT_PATH}${CL}"
     echo ""
+    echo -e "${TAB}REMOTE_TARGETS holds simple key-based SCP/SFTP destinations (no secrets,"
+    echo -e "${TAB}safe to keep here). NFS and FTP/FTPS targets — and anything with a password —"
+    echo -e "${TAB}are managed via ${BL}--targets${CL} and stored in TARGETS_FILE with chmod 600, so"
+    echo -e "${TAB}credentials never live in this (public-repo) script."
+    echo ""
     echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
     echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
-    # Dynamic config table: show only the user-facing scalar CONFIG vars, with the
-    # line each lives on. Exclusions drop the manifest array, color/meta vars, and
-    # internal runtime flags so the table stays focused on what's safe to edit.
     while IFS= read -r line; do
         local linenum var val
         linenum=$(echo "$line" | cut -d: -f1)
         var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
-        # Value is everything after the first '=', minus any trailing inline
-        # comment and surrounding quotes/space, so the column stays clean.
         val=$(echo "$line" | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '"' | xargs)
         printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
     done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" \
@@ -184,6 +206,8 @@ show_help() {
     echo -e "${BD}FILES${CL}"
     echo -e "${TAB}${BL}${BACKUP_DEST}/${CL}"
     echo -e "${TAB}${TAB}Archive destination (pve-config-<hostname>-<date>.tar.gz)."
+    echo -e "${TAB}${BL}${TARGETS_FILE}${CL}"
+    echo -e "${TAB}${TAB}Managed export-target store (chmod 600). Created on first --targets add."
     echo -e "${TAB}${BL}${LOG_FILE}${CL}"
     echo -e "${TAB}${TAB}Log output when running in cron/automated mode."
     echo ""
@@ -194,6 +218,9 @@ show_help() {
     echo -e "${BD}EXAMPLES${CL}"
     echo -e "${TAB}Interactive:"
     echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME}${CL}"
+    echo ""
+    echo -e "${TAB}Add/verify an export target:"
+    echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME} --targets${CL}"
     echo ""
     echo -e "${TAB}Automated via cron:"
     echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME} --cron >> ${LOG_FILE} 2>&1${CL}"
@@ -220,8 +247,6 @@ send_gotify() {
 
     local json_message curl_conf
     json_message=$(echo "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "\"${message}\"")
-    # Token goes in a chmod-600 curl config header, NOT the URL — a ?token= query
-    # string would leak in `ps aux` to any local user.
     curl_conf=$(mktemp /tmp/.gotify-XXXXXX); chmod 600 "$curl_conf"
     cat > "$curl_conf" <<CURLEOF
 header = "X-Gotify-Key: ${GOTIFY_TOKEN}"
@@ -333,6 +358,418 @@ manage_cron() {
 }
 
 # ============================================================
+# EXPORT TARGETS — NFS / SFTP / FTP(S)
+# ------------------------------------------------------------
+# Stored one-per-line in TARGETS_FILE (chmod 600), pipe-delimited:
+#   nfs|<host>:/<export>|<optional-subdir>
+#   sftp|<user@host>|<port>|<remote-path>
+#   ftp|<host>|<port>|<user>|<password>|<remote-path>|<tls 0|1>
+# REMOTE_TARGETS entries (user@host:/path) are folded in as sftp targets at load.
+# ============================================================
+
+# Populate TARGETS[] (specs) and TARGET_SRC[] (remote|file) in parallel.
+load_targets() {
+    TARGETS=(); TARGET_SRC=()
+    if [[ -n "$REMOTE_TARGETS" ]]; then
+        local t
+        for t in $REMOTE_TARGETS; do
+            TARGETS+=("sftp|${t%%:*}|22|${t#*:}"); TARGET_SRC+=("remote")
+        done
+    fi
+    if [[ -f "$TARGETS_FILE" ]]; then
+        local line
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            TARGETS+=("$line"); TARGET_SRC+=("file")
+        done < "$TARGETS_FILE"
+    fi
+}
+
+# Human-readable, password-masked label for a target spec.
+target_label() {
+    local spec="$1" type
+    type="${spec%%|*}"
+    case "$type" in
+        nfs)  local _t he sub; IFS='|' read -r _t he sub <<<"$spec"; echo "NFS    ${he}${sub:+/$sub}" ;;
+        sftp) local _t uh port path; IFS='|' read -r _t uh port path <<<"$spec"; echo "SFTP   ${uh}:${path} (port ${port})" ;;
+        ftp)  local _t host port user pass path tls; IFS='|' read -r _t host port user pass path tls <<<"$spec"
+              local p="FTP "; [[ "$tls" == "1" ]] && p="FTPS"
+              echo "${p}   ${user}@${host}:${path} (port ${port})" ;;
+        *) echo "UNKNOWN ${spec}" ;;
+    esac
+}
+
+# Create a small local canary file with unique content; return its path.
+make_canary() {
+    local f
+    f=$(mktemp /tmp/.pcb-canary-XXXXXX)
+    TEMP_FILES+=("$f")
+    echo "pve-config-backup canary | host=$(hostname) | $(date +%s) | $RANDOM" > "$f"
+    echo "$f"
+}
+
+# Ensure NFS client tooling is present; offer to install interactively.
+nfs_check_deps() {
+    command -v mount.nfs &>/dev/null && return 0
+    msg_warn "nfs-common not installed (required for NFS targets)"
+    if [[ "${INTERACTIVE:-true}" == true ]]; then
+        read -rp "  Install nfs-common now? [Y/n]: " a
+        if [[ ! "$a" =~ ^[Nn]$ ]]; then
+            if apt-get update -qq >/dev/null 2>&1 && apt-get install -y nfs-common >/dev/null 2>&1; then
+                msg_ok "nfs-common installed"; return 0
+            fi
+            msg_error "Install failed — install nfs-common manually"; return 1
+        fi
+    fi
+    return 1
+}
+
+# ---- Per-type verify (write -> read back -> delete a canary) ----
+
+verify_nfs() {
+    local he="$1" sub="$2" canary="$3"
+    nfs_check_deps || return 1
+    local ok=true cname mp dest
+    cname=$(basename "$canary")
+    mp=$(mktemp -d /tmp/.pcb-nfs-XXXXXX); TEMP_FILES+=("$mp")
+    msg_info "Mounting ${he}"
+    if mount -t nfs -o soft,timeo=50,retrans=2 "$he" "$mp" 2>/dev/null; then
+        msg_ok "Mounted ${he}"
+    else
+        msg_error "Mount failed (export path, firewall, or nfs-common?)"
+        rmdir "$mp" 2>/dev/null || true
+        return 1
+    fi
+    dest="$mp${sub:+/$sub}"
+    mkdir -p "$dest" 2>/dev/null || true
+    msg_info "Writing test file"
+    if cp "$canary" "$dest/$cname" 2>/dev/null; then msg_ok "Wrote ${cname}"; else msg_error "Write failed (permissions on export?)"; ok=false; fi
+    if [[ "$ok" == true ]]; then
+        msg_info "Reading it back"
+        if [[ -f "$dest/$cname" ]] && diff -q "$canary" "$dest/$cname" >/dev/null 2>&1; then msg_ok "Verified contents match"; else msg_error "Read-back/verify failed"; ok=false; fi
+    fi
+    if [[ -f "$dest/$cname" ]]; then
+        msg_info "Removing test file"
+        if rm -f "$dest/$cname" 2>/dev/null && [[ ! -f "$dest/$cname" ]]; then msg_ok "Removed ${cname}"; else msg_error "Delete failed"; ok=false; fi
+    fi
+    umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+    rmdir "$mp" 2>/dev/null || true
+    [[ "$ok" == true ]]
+}
+
+verify_sftp() {
+    local uh="$1" port="$2" path="$3" canary="$4"
+    local ok=true cname
+    cname=$(basename "$canary")
+    msg_info "Connecting to ${uh}"
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 -p "$port" "$uh" "true" 2>/dev/null; then
+        msg_ok "SSH connection OK (${uh})"
+    else
+        msg_error "SSH failed — key-based auth not set up? (try: ssh-copy-id -p ${port} ${uh})"
+        return 1
+    fi
+    msg_info "Writing test file"
+    if scp -q -o BatchMode=yes -o ConnectTimeout=10 -P "$port" "$canary" "${uh}:${path}/${cname}" 2>/dev/null; then msg_ok "Uploaded ${cname}"; else msg_error "Upload failed (is ${path} writable?)"; ok=false; fi
+    if [[ "$ok" == true ]]; then
+        msg_info "Confirming it landed"
+        if ssh -o BatchMode=yes -p "$port" "$uh" "test -f '${path}/${cname}'" 2>/dev/null; then msg_ok "Confirmed on remote"; else msg_error "Not found after upload"; ok=false; fi
+        msg_info "Removing test file"
+        if ssh -o BatchMode=yes -p "$port" "$uh" "rm -f '${path}/${cname}'" 2>/dev/null; then msg_ok "Removed ${cname}"; else msg_error "Delete failed"; ok=false; fi
+    fi
+    [[ "$ok" == true ]]
+}
+
+verify_ftp() {
+    local host="$1" port="$2" user="$3" pass="$4" path="$5" tls="$6" canary="$7"
+    local ok=true cname proto_opt="" conf back base
+    cname=$(basename "$canary")
+    [[ "$tls" == "1" ]] && proto_opt="--ssl-reqd"
+    conf=$(mktemp /tmp/.pcb-ftp-XXXXXX); chmod 600 "$conf"; TEMP_FILES+=("$conf")
+    printf 'user = "%s:%s"\n' "$user" "$pass" > "$conf"
+    base="ftp://${host}:${port}/${path#/}"; base="${base%/}/"
+    msg_info "Uploading test file"
+    if curl -s --connect-timeout 15 $proto_opt -K "$conf" -T "$canary" "${base}${cname}" 2>/dev/null; then msg_ok "Uploaded ${cname}"; else msg_error "Upload failed (host / creds / path / TLS?)"; ok=false; fi
+    if [[ "$ok" == true ]]; then
+        back=$(mktemp /tmp/.pcb-ftpback-XXXXXX); TEMP_FILES+=("$back")
+        msg_info "Downloading it back"
+        if curl -s --connect-timeout 15 $proto_opt -K "$conf" -o "$back" "${base}${cname}" 2>/dev/null && diff -q "$canary" "$back" >/dev/null 2>&1; then msg_ok "Verified contents match"; else msg_error "Read-back/verify failed"; ok=false; fi
+        msg_info "Removing test file"
+        if curl -s --connect-timeout 15 $proto_opt -K "$conf" -Q "DELE ${cname}" "$base" 2>/dev/null; then msg_ok "Removed ${cname}"; else msg_error "Delete failed (DELE not permitted?)"; ok=false; fi
+    fi
+    rm -f "$conf"
+    [[ "$ok" == true ]]
+}
+
+# Dispatch verification by target type. Returns 0 on full pass.
+verify_target() {
+    local spec="$1" type rc=1 canary
+    type="${spec%%|*}"
+    canary=$(make_canary)
+    case "$type" in
+        nfs)  local _t he sub;        IFS='|' read -r _t he sub <<<"$spec";       verify_nfs  "$he" "$sub" "$canary" && rc=0 || rc=1 ;;
+        sftp) local _t uh port path;  IFS='|' read -r _t uh port path <<<"$spec"; verify_sftp "$uh" "$port" "$path" "$canary" && rc=0 || rc=1 ;;
+        ftp)  local _t h p u pw pa t; IFS='|' read -r _t h p u pw pa t <<<"$spec"; verify_ftp  "$h" "$p" "$u" "$pw" "$pa" "$t" "$canary" && rc=0 || rc=1 ;;
+        *) msg_error "Unknown target type: ${type}"; rc=1 ;;
+    esac
+    rm -f "$canary" 2>/dev/null || true
+    return $rc
+}
+
+# ---- Per-type push of the real archive (no read-back/delete) ----
+push_typed_target() {
+    local spec="$1" archive="$2" type aname
+    type="${spec%%|*}"
+    aname=$(basename "$archive")
+    case "$type" in
+        nfs)
+            local _t he sub; IFS='|' read -r _t he sub <<<"$spec"
+            command -v mount.nfs &>/dev/null || return 1
+            local mp dest rc=0
+            mp=$(mktemp -d /tmp/.pcb-nfs-XXXXXX); TEMP_FILES+=("$mp")
+            mount -t nfs -o soft,timeo=50,retrans=2 "$he" "$mp" 2>/dev/null || { rmdir "$mp" 2>/dev/null || true; return 1; }
+            dest="$mp${sub:+/$sub}"; mkdir -p "$dest" 2>/dev/null || true
+            cp "$archive" "$dest/$aname" 2>/dev/null || rc=1
+            umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+            rmdir "$mp" 2>/dev/null || true
+            return $rc ;;
+        sftp)
+            local _t uh port path; IFS='|' read -r _t uh port path <<<"$spec"
+            scp -q -o BatchMode=yes -o ConnectTimeout=10 -P "$port" "$archive" "${uh}:${path}/" 2>/dev/null ;;
+        ftp)
+            local _t host port user pass path tls; IFS='|' read -r _t host port user pass path tls <<<"$spec"
+            local proto_opt="" conf base rc=0
+            [[ "$tls" == "1" ]] && proto_opt="--ssl-reqd"
+            conf=$(mktemp /tmp/.pcb-ftp-XXXXXX); chmod 600 "$conf"; TEMP_FILES+=("$conf")
+            printf 'user = "%s:%s"\n' "$user" "$pass" > "$conf"
+            base="ftp://${host}:${port}/${path#/}"; base="${base%/}/"
+            curl -s --connect-timeout 30 $proto_opt -K "$conf" -T "$archive" "${base}${aname}" 2>/dev/null || rc=1
+            rm -f "$conf"
+            return $rc ;;
+        *) return 1 ;;
+    esac
+}
+
+# Export to every target in TARGETS_FILE (sequential — mounts/uploads are
+# stateful; counts are small). REMOTE_TARGETS (scp) is handled by push_remote.
+export_typed_targets() {
+    local archive="$1" line label
+    [[ -f "$TARGETS_FILE" ]] || return 0
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        label=$(target_label "$line")
+        msg_info "Exporting to ${label}"
+        if push_typed_target "$line" "$archive"; then
+            msg_ok "Exported to ${label}"
+        else
+            msg_error "Export FAILED: ${label}"
+        fi
+    done < "$TARGETS_FILE"
+}
+
+# ---- Interactive target manager ----
+targets_add() {
+    echo ""
+    echo -e "${TAB}${BD}Add Export Target${CL}"
+    echo -e "${TAB}  ${GN}1)${CL} NFS share"
+    echo -e "${TAB}  ${GN}2)${CL} SFTP / SCP (over SSH, key-based)"
+    echo -e "${TAB}  ${GN}3)${CL} FTP / FTPS"
+    echo -e "${TAB}  ${RD}q)${CL} Cancel"
+    echo ""
+    read -rp "  Type [1-3/q]: " ty
+    local spec=""
+    case "$ty" in
+        1)
+            read -rp "  NFS host:export (e.g. 192.168.1.10:/export/backups): " he
+            [[ -z "$he" ]] && { msg_error "Nothing entered"; return; }
+            read -rp "  Sub-directory under the export (optional, blank = root): " sub
+            spec="nfs|${he}|${sub}" ;;
+        2)
+            read -rp "  user@host (e.g. root@192.168.1.11): " uh
+            [[ -z "$uh" ]] && { msg_error "Nothing entered"; return; }
+            read -rp "  SSH port [22]: " port; port="${port:-22}"
+            read -rp "  Remote path (e.g. /root/pve-backups): " path
+            [[ -z "$path" ]] && { msg_error "No path entered"; return; }
+            spec="sftp|${uh}|${port}|${path}" ;;
+        3)
+            read -rp "  FTP host: " host
+            [[ -z "$host" ]] && { msg_error "No host entered"; return; }
+            read -rp "  Port [21]: " port; port="${port:-21}"
+            read -rp "  Username: " user
+            read -rsp "  Password: " pass; echo ""
+            read -rp "  Remote path (e.g. /pve-backups): " path
+            read -rp "  Use TLS (FTPS — strongly recommended)? [Y/n]: " usetls
+            local tls=1; [[ "$usetls" =~ ^[Nn]$ ]] && tls=0
+            if [[ "$tls" == "0" ]]; then
+                echo ""
+                msg_warn "Plain FTP sends credentials AND the backup in cleartext."
+                echo -e "${TAB}  ${YW}This archive contains /etc/shadow hashes and SSH host keys —${CL}"
+                echo -e "${TAB}  ${YW}anyone on the network path could capture them. Prefer FTPS or SFTP.${CL}"
+                echo ""
+                read -rp "  Continue with plaintext FTP anyway? [y/N]: " c
+                [[ ! "$c" =~ ^[Yy]$ ]] && { echo ""; msg_ok "Cancelled — good call."; echo ""; return; }
+            fi
+            spec="ftp|${host}|${port}|${user}|${pass}|${path}|${tls}" ;;
+        *) return ;;
+    esac
+
+    echo ""
+    echo -e "${TAB}${BL}Verifying target — writing, reading back, and deleting a test file${CL}"
+    echo ""
+    if verify_target "$spec"; then
+        echo ""
+        msg_ok "Target verified successfully"
+        read -rp "  Save this target? [Y/n]: " s
+        if [[ ! "$s" =~ ^[Nn]$ ]]; then
+            mkdir -p "$(dirname "$TARGETS_FILE")"; chmod 700 "$(dirname "$TARGETS_FILE")"
+            touch "$TARGETS_FILE"; chmod 600 "$TARGETS_FILE"
+            echo "$spec" >> "$TARGETS_FILE"
+            msg_ok "Saved to ${TARGETS_FILE} (chmod 600)"
+        else
+            msg_warn "Not saved"
+        fi
+    else
+        echo ""
+        msg_error "Verification FAILED — target NOT saved. Fix the issue and try again."
+    fi
+    echo ""
+}
+
+targets_test_all() {
+    load_targets
+    echo ""
+    if [[ ${#TARGETS[@]} -eq 0 ]]; then msg_warn "No targets configured"; echo ""; return; fi
+    local i
+    for i in "${!TARGETS[@]}"; do
+        echo -e "${TAB}${BD}$(target_label "${TARGETS[$i]}")${CL}"
+        if verify_target "${TARGETS[$i]}"; then msg_ok "PASS"; else msg_error "FAIL"; fi
+        echo ""
+    done
+}
+
+targets_remove() {
+    load_targets
+    echo ""
+    if [[ ${#TARGETS[@]} -eq 0 ]]; then msg_warn "No targets to remove"; echo ""; return; fi
+    read -rp "  Number to remove (from the list above): " n
+    [[ "$n" =~ ^[0-9]+$ ]] || { msg_error "Invalid number"; echo ""; return; }
+    local idx=$((n - 1))
+    [[ $idx -lt 0 || $idx -ge ${#TARGETS[@]} ]] && { msg_error "Out of range"; echo ""; return; }
+    if [[ "${TARGET_SRC[$idx]}" == "remote" ]]; then
+        msg_warn "That target comes from REMOTE_TARGETS in the script config."
+        echo -e "${TAB}  Edit the REMOTE_TARGETS line near the top of ${SCRIPT_PATH} to change it."
+        echo ""
+        return
+    fi
+    local spec="${TARGETS[$idx]}" tmp removed=false l
+    tmp=$(mktemp /tmp/.pcb-targets-XXXXXX); TEMP_FILES+=("$tmp")
+    while IFS= read -r l; do
+        if [[ "$removed" == false && "$l" == "$spec" ]]; then removed=true; continue; fi
+        echo "$l" >> "$tmp"
+    done < "$TARGETS_FILE"
+    cat "$tmp" > "$TARGETS_FILE"; chmod 600 "$TARGETS_FILE"; rm -f "$tmp"
+    msg_ok "Removed: $(target_label "$spec")"
+    echo ""
+}
+
+manage_targets() {
+    header_info
+    echo -e "${TAB}${BD}Export Target Manager${CL}"
+    echo -e "${TAB}Archives are copied to every configured target after each backup."
+    echo ""
+    while true; do
+        load_targets
+        echo -e "${TAB}${BD}Configured targets:${CL}"
+        if [[ ${#TARGETS[@]} -eq 0 ]]; then
+            echo -e "${TAB}  ${YW}none${CL}"
+        else
+            local idx=1 t
+            for t in "${TARGETS[@]}"; do
+                echo -e "${TAB}  ${GN}${idx})${CL} $(target_label "$t")"
+                idx=$((idx + 1))
+            done
+        fi
+        echo ""
+        echo -e "${TAB}  ${GN}a)${CL} Add a target (with live verification)"
+        echo -e "${TAB}  ${GN}t)${CL} Test all targets"
+        echo -e "${TAB}  ${GN}r)${CL} Remove a target"
+        echo -e "${TAB}  ${RD}q)${CL} Back"
+        echo ""
+        read -rp "  Select [a/t/r/q]: " m
+        case "$m" in
+            a|A) targets_add ;;
+            t|T) targets_test_all ;;
+            r|R) targets_remove ;;
+            q|Q) echo ""; return 0 ;;
+            *) msg_error "Invalid option"; echo "" ;;
+        esac
+    done
+}
+
+# ============================================================
+# RETENTION (prefix-scoped — never a blind rm)
+# ============================================================
+apply_retention() {
+    [[ "$RETENTION_DAYS" -le 0 ]] && return 0
+    local removed=0
+    while IFS= read -r -d '' old; do
+        rm -f "$old" && removed=$((removed + 1))
+    done < <(find "$BACKUP_DEST" -maxdepth 1 -type f \
+                -name 'pve-config-*.tar.gz' \
+                -mtime +"$RETENTION_DAYS" -print0 2>/dev/null)
+    [[ "$removed" -gt 0 ]] && msg_ok "Retention: removed ${removed} archive(s) older than ${RETENTION_DAYS} days"
+    return 0
+}
+
+# ============================================================
+# PUSH TO SCP/SFTP TARGET(S) (REMOTE_TARGETS) — parallel when more than one
+# ============================================================
+scp_one() {
+    local archive="$1" target="$2"
+    scp -q -o BatchMode=yes -o ConnectTimeout=10 "$archive" "$target/" 2>/dev/null
+}
+
+push_remote() {
+    local archive="$1"
+    [[ -z "$REMOTE_TARGETS" ]] && return 0
+    echo ""
+    echo -e "${TAB}${BL}Replicating to SCP/SFTP target(s)${CL}"
+    echo ""
+
+    local targets=($REMOTE_TARGETS)
+    local count=${#targets[@]}
+
+    if [[ "$count" -eq 1 ]]; then
+        msg_info "Copying to ${targets[0]}"
+        if scp_one "$archive" "${targets[0]}"; then
+            msg_ok "Replicated to ${targets[0]}"
+        else
+            msg_error "Failed to replicate to ${targets[0]} (check SSH key + path)"
+        fi
+    else
+        local results pids=()
+        results=$(mktemp -d /tmp/.pcb-scp-XXXXXX)
+        TEMP_FILES+=("$results")
+        local i=0
+        for t in "${targets[@]}"; do
+            ( if scp_one "$archive" "$t"; then echo 0; else echo 1; fi > "${results}/${i}" ) &
+            pids+=($!)
+            i=$((i + 1))
+        done
+        for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+        i=0
+        for t in "${targets[@]}"; do
+            if [[ -f "${results}/${i}" && "$(cat "${results}/${i}")" == "0" ]]; then
+                msg_ok "Replicated to ${t}"
+            else
+                msg_error "Failed to replicate to ${t} (check SSH key + path)"
+            fi
+            i=$((i + 1))
+        done
+        rm -rf "$results"
+    fi
+}
+
+# ============================================================
 # ENVIRONMENT / PREFLIGHT
 # ============================================================
 preflight_checks() {
@@ -340,7 +777,6 @@ preflight_checks() {
     echo ""
     local CRITICAL=false
 
-    # This script is host-targeted: bail clearly if it's not a PVE node.
     if command -v pveversion &>/dev/null && [[ -d /etc/pve ]]; then
         msg_ok "Proxmox VE host detected ($(pveversion 2>/dev/null | head -1))"
     else
@@ -348,7 +784,6 @@ preflight_checks() {
         CRITICAL=true
     fi
 
-    # Required tools.
     for dep in tar gzip; do
         if command -v "$dep" &>/dev/null; then
             msg_ok "${dep} installed"
@@ -358,15 +793,12 @@ preflight_checks() {
         fi
     done
 
-    # The pmxcfs backing database is the single most important file for a host
-    # rebuild — warn loudly if it's missing rather than silently skipping it.
     if [[ -f /var/lib/pve-cluster/config.db ]]; then
         msg_ok "pmxcfs database present (config.db)"
     else
         msg_warn "config.db not found — archive will exclude the pmxcfs database"
     fi
 
-    # Destination must exist and be writable; offer to create it interactively.
     if [[ -d "$BACKUP_DEST" ]]; then
         if [[ -w "$BACKUP_DEST" ]]; then
             msg_ok "Destination writable (${BACKUP_DEST})"
@@ -385,7 +817,6 @@ preflight_checks() {
                 CRITICAL=true
             fi
         else
-            # Non-interactive (cron): create it without prompting so jobs don't stall.
             mkdir -p "$BACKUP_DEST" && chmod 700 "$BACKUP_DEST" \
                 && msg_ok "Created ${BACKUP_DEST}" || { msg_error "Could not create ${BACKUP_DEST}"; CRITICAL=true; }
         fi
@@ -413,7 +844,6 @@ show_status() {
 
     local archives=()
     if [[ -d "$BACKUP_DEST" ]]; then
-        # nullglob (set at top) means this yields an empty array if nothing matches.
         archives=("$BACKUP_DEST"/pve-config-"$(hostname)"-*.tar.gz)
     fi
 
@@ -428,10 +858,16 @@ show_status() {
     fi
 
     echo -e "${TAB}${BL}Retention:${CL}   ${RETENTION_DAYS} days"
-    if [[ -n "$REMOTE_TARGETS" ]]; then
-        echo -e "${TAB}${BL}Remote:${CL}      ${REMOTE_TARGETS}"
+
+    load_targets
+    if [[ ${#TARGETS[@]} -gt 0 ]]; then
+        echo -e "${TAB}${BL}Export tgts:${CL} ${#TARGETS[@]}"
+        local t
+        for t in "${TARGETS[@]}"; do
+            echo -e "${TAB}             $(target_label "$t")"
+        done
     else
-        echo -e "${TAB}${BL}Remote:${CL}      ${YW}none configured${CL}"
+        echo -e "${TAB}${BL}Export tgts:${CL} ${YW}none configured${CL}"
     fi
 
     local cron_line
@@ -463,7 +899,6 @@ list_backups() {
     fi
     printf "${TAB}${BD}%-44s %8s  %s${CL}\n" "Archive" "Size" "Date"
     echo -e "${TAB}────────────────────────────────────────────  ────────  ─────────────────"
-    # Newest first.
     while IFS= read -r f; do
         printf "${TAB}${GN}%-44s${CL} %8s  %s\n" \
             "$(basename "$f")" \
@@ -499,7 +934,6 @@ restore_backup() {
     echo ""
 
     echo -e "${TAB}${BD}Contents:${CL}"
-    # Show top-level structure so the user can see what's available to restore.
     find "$review_dir" -maxdepth 3 -type f 2>/dev/null | sed "s|${review_dir}|  ${TAB}|" | head -40
     echo ""
 
@@ -520,7 +954,7 @@ restore_backup() {
     echo -e "${TAB}       ${BL}chmod 600 /var/lib/pve-cluster/config.db${CL}"
     echo -e "${TAB}    3) Restore identity files: ${BL}/etc/hostname${CL}, ${BL}/etc/hosts${CL}"
     echo -e "${TAB}    4) Start the service and verify:"
-    echo -e "${TAB}       ${BL}systemctl start pve-cluster${CL}  →  ${BL}ls /etc/pve${CL}"
+    echo -e "${TAB}       ${BL}systemctl start pve-cluster${CL}  ->  ${BL}ls /etc/pve${CL}"
     echo ""
     if [[ -f "$review_dir/etc/corosync/corosync.conf" ]]; then
         echo -e "${TAB}${YW}This archive contains corosync config — node was clustered.${CL}"
@@ -535,77 +969,8 @@ restore_backup() {
 }
 
 # ============================================================
-# RETENTION (prefix-scoped — never a blind rm)
-# ============================================================
-apply_retention() {
-    [[ "$RETENTION_DAYS" -le 0 ]] && return 0
-    local removed=0
-    # Only ever match OUR own archive naming pattern inside the dest dir. We never
-    # recurse, follow symlinks, or touch anything not produced by this script.
-    while IFS= read -r -d '' old; do
-        rm -f "$old" && removed=$((removed + 1))
-    done < <(find "$BACKUP_DEST" -maxdepth 1 -type f \
-                -name 'pve-config-*.tar.gz' \
-                -mtime +"$RETENTION_DAYS" -print0 2>/dev/null)
-    [[ "$removed" -gt 0 ]] && msg_ok "Retention: removed ${removed} archive(s) older than ${RETENTION_DAYS} days"
-    return 0
-}
-
-# ============================================================
-# PUSH TO REMOTE TARGET(S) — parallel when more than one
-# ============================================================
-scp_one() {
-    local archive="$1" target="$2"
-    # BatchMode so a missing key fails fast instead of hanging on a password prompt.
-    scp -q -o BatchMode=yes -o ConnectTimeout=10 "$archive" "$target/" 2>/dev/null
-}
-
-push_remote() {
-    local archive="$1"
-    [[ -z "$REMOTE_TARGETS" ]] && return 0
-    echo ""
-    echo -e "${TAB}${BL}Replicating to remote target(s)${CL}"
-    echo ""
-
-    local targets=($REMOTE_TARGETS)
-    local count=${#targets[@]}
-
-    if [[ "$count" -eq 1 ]]; then
-        msg_info "Copying to ${targets[0]}"
-        if scp_one "$archive" "${targets[0]}"; then
-            msg_ok "Replicated to ${targets[0]}"
-        else
-            msg_error "Failed to replicate to ${targets[0]} (check SSH key + path)"
-        fi
-    else
-        # Independent destinations → fan out; all finish in the time of the slowest.
-        local results pids=()
-        results=$(mktemp -d /tmp/.pve-cfg-scp-XXXXXX)
-        TEMP_FILES+=("$results")
-        local i=0
-        for t in "${targets[@]}"; do
-            ( if scp_one "$archive" "$t"; then echo 0; else echo 1; fi > "${results}/${i}" ) &
-            pids+=($!)
-            i=$((i + 1))
-        done
-        for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
-        i=0
-        for t in "${targets[@]}"; do
-            if [[ -f "${results}/${i}" && "$(cat "${results}/${i}")" == "0" ]]; then
-                msg_ok "Replicated to ${t}"
-            else
-                msg_error "Failed to replicate to ${t} (check SSH key + path)"
-            fi
-            i=$((i + 1))
-        done
-        rm -rf "$results"
-    fi
-}
-
-# ============================================================
 # CORE — build the archive
 # ============================================================
-# Set by run_backup so the summary/notification can report results.
 ARCHIVE_PATH=""
 ARCHIVE_SIZE=""
 SKIPPED_PATHS=()
@@ -619,18 +984,14 @@ run_backup() {
     date_s=$(date +%Y-%m-%d-%H%M%S)
     ARCHIVE_PATH="${BACKUP_DEST}/pve-config-${hostname_s}-${date_s}.tar.gz"
 
-    # Stage a copy first, then tar the staging dir. Copying off the live pmxcfs
-    # mount avoids "file changed as we read it" races and gives one clean archive.
-    # mktemp -d is 700; cp -a preserves perms so secrets stay 600/640 inside.
     staging=$(mktemp -d /tmp/pve-config-stage-XXXXXX)
     TEMP_FILES+=("$staging")
 
-    # Assemble the effective manifest from defaults + toggles + user extras.
     local paths=("${BACKUP_PATHS[@]}")
     [[ "$INCLUDE_SHADOW" == true ]] && paths+=("/etc/shadow" "/etc/gshadow")
     [[ "$INCLUDE_SSH_HOST_KEYS" == true ]] && paths+=("/etc/ssh")
     if [[ -f /etc/corosync/corosync.conf ]]; then
-        paths+=("/etc/corosync")   # Only meaningful on clustered nodes
+        paths+=("/etc/corosync")
     fi
     [[ -n "$EXTRA_PATHS" ]] && paths+=($EXTRA_PATHS)
 
@@ -641,7 +1002,6 @@ run_backup() {
         if [[ -e "$p" ]]; then
             dest_parent="${staging}$(dirname "$p")"
             mkdir -p "$dest_parent"
-            # cp -a: archive mode preserves ownership, perms, timestamps, symlinks.
             cp -a "$p" "$dest_parent/" 2>/dev/null || SKIPPED_PATHS+=("$p")
         else
             SKIPPED_PATHS+=("$p")
@@ -649,7 +1009,6 @@ run_backup() {
     done
     msg_ok "Staged $(( ${#paths[@]} - ${#SKIPPED_PATHS[@]} )) of ${#paths[@]} path(s)"
 
-    # The pmxcfs backing database — the single most important file for a rebuild.
     if [[ -f /var/lib/pve-cluster/config.db ]]; then
         msg_info "Capturing pmxcfs database (config.db)"
         mkdir -p "${staging}/var/lib/pve-cluster"
@@ -658,7 +1017,6 @@ run_backup() {
             || msg_warn "Could not capture config.db"
     fi
 
-    # Record what was skipped, inside the archive, so a future restore knows.
     {
         echo "# pve-config-backup manifest — ${hostname_s} — ${date_s}"
         echo "# Generated by ${SCRIPT_NAME} ${SCRIPT_VERSION}"
@@ -674,8 +1032,6 @@ run_backup() {
     } > "${staging}/MANIFEST.txt"
 
     msg_info "Creating archive"
-    # tar from the staging root. Exit 1 = "some files differed" (benign here since
-    # we already copied to a static staging dir); exit 2 = fatal. Treat only 2 as error.
     local tar_rc=0
     tar czf "$ARCHIVE_PATH" -C "$staging" . 2>/dev/null || tar_rc=$?
     if [[ "$tar_rc" -ge 2 ]]; then
@@ -685,12 +1041,10 @@ run_backup() {
         return 1
     fi
 
-    # The archive aggregates password hashes and SSH host keys — lock it down.
     chmod 600 "$ARCHIVE_PATH"
     ARCHIVE_SIZE=$(du -h "$ARCHIVE_PATH" | cut -f1)
     msg_ok "Archive created: $(basename "$ARCHIVE_PATH") (${ARCHIVE_SIZE}, perms 600)"
 
-    # Clean staging immediately — no need to keep secrets in /tmp longer than necessary.
     rm -rf "$staging"
 
     if [[ ${#SKIPPED_PATHS[@]} -gt 0 ]]; then
@@ -698,16 +1052,20 @@ run_backup() {
     fi
 
     apply_retention
+
     push_remote "$ARCHIVE_PATH"
+    if [[ -f "$TARGETS_FILE" ]]; then
+        echo ""
+        echo -e "${TAB}${BL}Exporting to configured targets${CL}"
+        echo ""
+        export_typed_targets "$ARCHIVE_PATH"
+    fi
     return 0
 }
 
 # ============================================================
 # MAIN
 # ============================================================
-
-# Early exit for help, version, and read-only / guided info flags. These run
-# before the root check and any work, matching the repo flow pattern.
 ARGS=("${@:-}")
 i=0
 while [[ $i -lt ${#ARGS[@]} ]]; do
@@ -718,9 +1076,13 @@ while [[ $i -lt ${#ARGS[@]} ]]; do
         --list) list_backups ;;
         --test-notify) test_gotify ;;
         --schedule) manage_cron ;;
+        --targets)
+            if [[ $EUID -ne 0 ]]; then header_info; msg_error "Managing targets must be run as root (use sudo)"; exit 1; fi
+            INTERACTIVE=true
+            manage_targets
+            echo ""
+            exit 0 ;;
         --restore)
-            # restore needs root to read the archive and write to /root — defer the
-            # root check to after extraction-path setup is trivial; enforce here.
             if [[ $EUID -ne 0 ]]; then header_info; msg_error "Restore must be run as root (use sudo)"; exit 1; fi
             restore_file="${ARGS[$((i+1))]:-}"
             [[ -z "$restore_file" ]] && { header_info; msg_error "--restore requires a path to an archive"; exit 1; }
@@ -732,13 +1094,11 @@ done
 
 header_info
 
-# Root check — needs to read /etc/shadow, config.db, and write to system dirs.
 if [[ $EUID -ne 0 ]]; then
     msg_error "This script must be run as root (use sudo)"
     exit 1
 fi
 
-# Parse action flags.
 AUTO_YES=false
 INTERACTIVE=true
 for arg in "${ARGS[@]:-}"; do
@@ -749,18 +1109,18 @@ done
 
 preflight_checks
 
-# Interactive menu — every flag is mirrored here, and vice versa.
 if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}${BL}What would you like to do?${CL}"
     echo ""
     echo -e "${TAB}  ${GN}1)${CL} Run a configuration backup now"
     echo -e "${TAB}  ${GN}2)${CL} List existing archives"
     echo -e "${TAB}  ${GN}3)${CL} Restore from an archive (guided)"
-    echo -e "${TAB}  ${GN}4)${CL} Test Gotify notification"
-    echo -e "${TAB}  ${GN}5)${CL} Manage cron schedule"
+    echo -e "${TAB}  ${GN}4)${CL} Manage export targets (NFS / SFTP / FTPS)"
+    echo -e "${TAB}  ${GN}5)${CL} Test Gotify notification"
+    echo -e "${TAB}  ${GN}6)${CL} Manage cron schedule"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-5/q]: " choice
+    read -rp "  Select an option [1-6/q]: " choice
     case "$choice" in
         1) ;;
         2) list_backups ;;
@@ -769,22 +1129,21 @@ if [[ "$INTERACTIVE" == true ]]; then
             [[ -z "$rfile" ]] && { msg_error "No path given"; exit 1; }
             restore_backup "$rfile"
             ;;
-        4) test_gotify ;;
-        5) manage_cron ;;
+        4) manage_targets; echo ""; exit 0 ;;
+        5) test_gotify ;;
+        6) manage_cron ;;
         q|Q) echo ""; msg_ok "Exiting. No changes made."; echo ""; exit 0 ;;
         *) msg_error "Invalid option"; exit 1 ;;
     esac
     echo ""
 fi
 
-# Do the backup.
 if run_backup; then
     echo ""
     echo -e "${TAB}${GN}✓ Backup complete!${CL}"
     echo -e "${TAB}  ${BL}${ARCHIVE_PATH}${CL} (${ARCHIVE_SIZE})"
     echo ""
 
-    # Notify only in automated mode, never interactively (matches repo convention).
     if [[ "$AUTO_YES" == true ]]; then
         skipped_note=""
         [[ ${#SKIPPED_PATHS[@]} -gt 0 ]] && skipped_note="**Skipped:** ${#SKIPPED_PATHS[@]} path(s) not present
