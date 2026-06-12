@@ -506,6 +506,50 @@ A restore feature should mirror the backup wizard's "ask, then do the hard parts
 
 ---
 
+## 22. The guided-setup standard (every interactive script)
+
+**This is a house standard, not an optional nicety.** The repo's thesis is "no flags to memorize, no digging through code." A user with little to no Linux knowledge should be able to run the script and be *walked through* everything it needs — the same way config-backup's `--setup` and restore wizard work. If a setting cannot currently be configured through a wizard, the script is incomplete; add the wizard path.
+
+Every script that has user-configurable settings, secrets, or scheduling MUST provide a guided setup that:
+
+1. **Walks every setting it needs**, one prompt at a time, with sensible defaults shown in brackets (`[current]`). Non-technical users answer questions; they never have to know which variable or file to edit.
+2. **Seals secrets inline** at the moment they're entered (`secret_set`), never echoing them to a settings file or the script. The prompt for a secret uses `read -rsp` (no echo).
+3. **Persists non-secret answers** to the managed settings file (pattern 15) so they survive and the wizard need only run once. Scheduling, if offered, is gated on canonical-path install (pattern 17).
+4. **Is re-runnable** and shows what's already stored, so changing one setting doesn't mean re-entering all of them or hand-editing a file.
+5. **Is auto-offered on first run** (when nothing is configured yet) and is also reachable as a `--setup` flag and a menu item — every entry point, like every other feature (pattern 7).
+
+### Persistence contract: settings file wins, config block is the default
+
+The config-block variables at the top of the script are **fallback defaults**, not the source of truth. Resolution order at startup:
+
+```
+hardcoded default (config block)  →  overridden by settings file  →  overridden by an explicit CLI flag
+```
+
+Implementation: `load_settings` runs at startup and overwrites the config-block variable for any key present in the managed settings file. The wizard writes user answers via `settings_set`. This means:
+- A non-technical user runs `--setup` once and never touches the file.
+- A power user can still edit the config block (it works as the default) OR the settings file OR pass a flag.
+- The whitelist in `load_settings` MUST cover every setting the wizard can write — a key the wizard stores but `load_settings` doesn't read back is a silent no-op.
+
+```bash
+# config block (defaults)
+CHECK_TIMEOUT=5
+
+# load_settings whitelist (must include every wizard-writable key)
+case "$key" in
+    CHECK_TIMEOUT) CHECK_TIMEOUT="$val" ;;
+    # ...
+esac
+
+# wizard
+read -rp "  Seconds before a mount is considered stale [${CHECK_TIMEOUT}]: " _t
+[[ -n "$_t" ]] && { CHECK_TIMEOUT="$_t"; settings_set CHECK_TIMEOUT "$_t"; }
+```
+
+Never write a secret with `settings_set` — secrets go through `secret_set` only. The settings file is `chmod 600` regardless, but it is parsed-not-sourced (pattern 15) and must never hold a credential.
+
+---
+
 ## Checklist when adding a pattern to a new script
 
 - [ ] Colors + message functions (1, 2)
@@ -517,11 +561,12 @@ A restore feature should mirror the backup wizard's "ask, then do the hard parts
 - [ ] Secure Gotify + test_gotify if notifications apply (8); resolve sealed-first if sealing (14)
 - [ ] Cron manager if scheduling applies (9); gate on install if self-installing (17)
 - [ ] Parallel for independent multi-target work (10)
-- [ ] Checksum verification for downloads (11)
+- [ ] Checksum verification for downloads — **fail closed**, with an explicit override flag only (11, 22)
 - [ ] Backup + rollback for destructive changes (12)
 - [ ] Cluster deployment documented for host scripts (13)
 - [ ] Sealed credentials instead of plaintext where a secret must be replayed (14)
 - [ ] Managed settings parsed-not-sourced if persisting choices (15)
 - [ ] Live write/read/delete verification for saved remote targets (16)
 - [ ] Guided setup + self-install for run-once unattended tools (17)
+- [ ] **Guided wizard covering every setting the script needs — the house standard (22).** If any setting can only be set by editing the config block, that's a gap to close. Settings file is source of truth, config block is fallback default.
 - [ ] README `<details>` section + CLAUDE.md table + TODO.md entry

@@ -175,6 +175,31 @@ install-gated scheduling) into the template and the other cron-worthy scripts.
       empty-crontab schedule write, and `--set-cred gotify-token` → `--test-notify` round-trip.
 - [ ] After validation: update README per-script sections for the new flags/behavior
 
+### Guided-wizard rollout (house standard — PATTERNS.md 22)
+
+Standard codified in CLAUDE.md / PATTERNS.md / README: every script with settings, secrets,
+or scheduling must have a config-backup-style guided wizard. Settings file is source of truth;
+config block is fallback default. Build one script at a time, hardware-tested each.
+
+- [x] Standard documented (CLAUDE.md design principle, PATTERNS.md #22 with persistence contract, README promise)
+- [ ] **pi-hole-sync** — `--setup` wizard: walk BACKUP_PIHOLES, SSH user/port, retention, Gotify
+      URL + seal token, schedule. Extend `load_settings` whitelist to all of these. (do first — most settings)
+- [ ] **nfs-watchdog** — `--setup` wizard: CHECK_TIMEOUT, AUTO_REMOUNT, Gotify, schedule
+- [ ] **update-traefik** — `--setup` wizard: the TRAEFIK_* paths/service/port settings, Gotify, schedule
+- [ ] Each: config-block vars become fallback defaults overridden by the settings file; hardware-test
+      the persistence (set via wizard → re-run → values remembered) + sealing + scheduling
+- [ ] Promote a reusable `run_setup` skeleton into script-template.sh once the pattern is proven across all three
+
+### Supply-chain hardening (update-traefik)
+
+- [x] **update-traefik → v1.2.0** — checksum verification now fails closed (was fail-open:
+      missing checksum → silent unverified install). Added `--insecure-skip-checksum` flag +
+      interactive y/N override; checksum mismatch is always fatal. Logged in SECURITY.md.
+- [ ] Consider out-of-band **pinned hashes** for known-good Traefik versions (defends against
+      a compromised upstream release, which a same-origin checksum cannot)
+- [ ] Consider making `latest` require explicit confirmation (don't auto-pull a new upstream
+      release with no human in the loop) — the real Shai-Hulud-class mitigation
+
 ## Planned Scripts
 
 ### docker-compose-updater.sh

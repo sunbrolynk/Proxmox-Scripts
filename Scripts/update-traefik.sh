@@ -31,7 +31,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -126,6 +126,11 @@ ${TAB}${TAB}Update Traefik Manager only, skip Traefik binary.
 
 ${TAB}${GN}--check${CL}
 ${TAB}${TAB}Show current vs latest versions and exit without updating.
+
+${TAB}${GN}--insecure-skip-checksum${CL}
+${TAB}${TAB}Proceed even if the SHA256 checksum can't be fetched/verified.
+${TAB}${TAB}NOT recommended — only for offline mirrors or known-good environments.
+${TAB}${TAB}A checksum MISMATCH still always aborts; this only bypasses a MISSING checksum.
 
 ${TAB}${GN}--rollback${CL}
 ${TAB}${TAB}Restore previous Traefik binary from backup (.bak file).
@@ -987,27 +992,56 @@ update_traefik() {
     fi
     msg_ok "Downloaded Traefik ${target_version}"
 
-    # Verify SHA256 checksum
+    # Verify SHA256 checksum. This defends against transit tampering / a poisoned
+    # mirror — NOT against a compromised upstream release (the checksum is served
+    # from the same origin as the binary). We still fail CLOSED: no valid checksum
+    # means no install, unless the operator explicitly opts out.
     msg_info "Verifying SHA256 checksum"
     local checksum_file="/tmp/traefik_checksums_${target_version}.txt"
     TEMP_FILES+=("$checksum_file")
+    local checksum_ok=false
     if wget -q "${checksum_url}" -O "$checksum_file" 2>/dev/null; then
         local expected_hash actual_hash archive_name
         archive_name="traefik_${target_version}_${TRAEFIK_ARCH}.tar.gz"
         expected_hash=$(grep "${archive_name}" "$checksum_file" | awk '{print $1}')
         actual_hash=$(sha256sum "$tmp_file" | awk '{print $1}')
-        if [[ -n "$expected_hash" ]] && [[ "$expected_hash" == "$actual_hash" ]]; then
+        if [[ -z "$expected_hash" ]]; then
+            msg_error "No checksum entry for ${archive_name} in the published checksums file"
+        elif [[ "$expected_hash" == "$actual_hash" ]]; then
             msg_ok "Checksum verified (SHA256)"
+            checksum_ok=true
         else
-            msg_error "Checksum mismatch! Download may be corrupted or tampered with"
+            msg_error "Checksum MISMATCH — download may be corrupted or tampered with"
             echo -e "${TAB}  Expected: ${YW}${expected_hash}${CL}"
             echo -e "${TAB}  Got:      ${RD}${actual_hash}${CL}"
             rm -f "$tmp_file" "$checksum_file"
-            return 1
+            return 1   # a mismatch is ALWAYS fatal — no override
         fi
         rm -f "$checksum_file"
     else
-        msg_warn "Checksum file not available — skipping verification"
+        msg_error "Could not fetch the published checksums file"
+    fi
+
+    # If we couldn't positively verify (missing file or missing entry — NOT a
+    # mismatch, which already returned above), fail closed unless overridden.
+    if [[ "$checksum_ok" != true ]]; then
+        if [[ "${SKIP_CHECKSUM:-false}" == true ]]; then
+            msg_warn "Proceeding WITHOUT checksum verification (--insecure-skip-checksum)"
+        elif [[ "${INTERACTIVE:-true}" == true ]]; then
+            echo -e "${TAB}${YW}The download could not be cryptographically verified.${CL}"
+            echo -e "${TAB}Installing an unverified binary is a supply-chain risk."
+            read -rp "  Install ANYWAY without verification? [y/N]: " _v
+            if [[ ! "$_v" =~ ^[Yy]$ ]]; then
+                msg_error "Aborted — binary not installed (no checksum)."
+                rm -f "$tmp_file"
+                return 1
+            fi
+            msg_warn "Proceeding without verification at user's explicit request"
+        else
+            msg_error "No checksum verification possible — aborting (use --insecure-skip-checksum to override in automation)."
+            rm -f "$tmp_file"
+            return 1
+        fi
     fi
 
     # Backup
@@ -1231,6 +1265,7 @@ CHECK_ONLY=false
 DO_ROLLBACK=false
 SHOW_CHANGELOG=false
 CRON_MODE=false
+SKIP_CHECKSUM=false
 
 for arg in "${@:-}"; do
     case "${arg:-}" in
@@ -1241,6 +1276,7 @@ for arg in "${@:-}"; do
         --rollback) DO_ROLLBACK=true ;;
         --changelog) SHOW_CHANGELOG=true ;;
         --cron) CRON_MODE=true; INTERACTIVE=false ;;
+        --insecure-skip-checksum) SKIP_CHECKSUM=true ;;
         v*) SPECIFIC_VERSION="$arg"; INTERACTIVE=false ;;
     esac
 done

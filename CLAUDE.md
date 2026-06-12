@@ -81,6 +81,12 @@ Full man-page sections in this order: NAME, SYNOPSIS, DESCRIPTION, OPTIONS, CONF
 - **Automatic backups + rollback** — before modifying binaries/configs; auto-restore on failure
 - **Clear error messages** — tell the user WHAT failed and HOW to fix it manually
 - **Summary on completion** — final versions, URLs, status
+- **Guided wizard (house standard — see below)** — if the script has settings, secrets, or scheduling
+
+### Guided Setup is the Standard, Not a Bonus (PATTERNS.md 22)
+The repo's whole pitch is "no flags to memorize, no digging through code." That promise is only real if a user with little Linux knowledge can be **walked through** everything a script needs. So: **any script with user-configurable settings, secrets, or scheduling must provide a guided wizard** (`--setup` flag + menu item + auto-offered on first run) that prompts for each setting with sensible defaults, seals secrets inline, persists non-secret answers, and gates scheduling on install. `pve-config-backup.sh` (setup wizard + restore wizard) is the reference.
+
+If a setting can currently *only* be changed by hand-editing the config block, that is a **gap to close**, not an acceptable state — add the wizard path. The config-block variables are **fallback defaults**; the persisted settings file is the source of truth (resolution order: config-block default → settings file → explicit CLI flag). Editing the block still works for power users, but no user should be *required* to.
 
 ### Parallel by Default
 When an operation runs across multiple independent targets (mounts, hosts, containers), run them in PARALLEL using background jobs + temp-file result collection, not a sequential loop. Single-target keeps live output; multi-target forks and collects. See PATTERNS.md "parallel execution". Exception: operations that must be sequential for safety (e.g. remounts, anything that competes for a shared lock).
@@ -189,7 +195,7 @@ Not every script needs these, but when a script must store a replayable secret, 
 
 | Script | Purpose | Status |
 |--------|---------|--------|
-| update-traefik.sh | Update Traefik binary and Traefik Manager | Active — v1.1.0 (sealed Gotify + hardened cron) |
+| update-traefik.sh | Update Traefik binary and Traefik Manager | Active — v1.2.0 (sealed Gotify, hardened cron, fail-closed checksum) |
 | pct-force-destroy.sh | Force destroy LXCs with stale NFS locks | Active |
 | pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active — v1.1.0 (sealed Gotify + hardened cron) |
 | nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active — v1.1.0 (sealed Gotify + hardened cron) |

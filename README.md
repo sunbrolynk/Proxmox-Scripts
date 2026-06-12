@@ -23,8 +23,10 @@ A collection of utility scripts for managing services running on Proxmox VE — 
 These scripts are born out of real-world homelab and small business infrastructure management. They're designed to be:
 
 - **Interactive** — colored output, guided menus, clear prompts — no flags to memorize
+- **Guided** — scripts walk you through setup one question at a time, seal any secrets for you, and remember your answers — no Linux knowledge or config-file editing required (you *can* edit the config block if you prefer, but you never have to)
 - **Safe** — preflight checks, automatic backups, rollback on failure, graceful CTRL+C handling
-- **Configurable** — user-adjustable variables at the top of each script, no digging through code
+- **Configurable** — non-secret settings (paths, IPs, timeouts) live in a labeled block at the top of each script; edit only what you need, no digging through code
+- **Secret-safe** — never put a Gotify token or password in the script. Seal it instead with `--set-cred` (or, where available, the guided setup) so it's encrypted on disk and never stored in plaintext or sent in a URL
 - **Transparent** — no obfuscated code, no telemetry, fully readable and auditable
 - **Schedulable** — scripts that benefit from automation include a built-in cron scheduler — no cron knowledge required, just pick a frequency from the menu
 - **Notifiable** — optional [Gotify](https://gotify.net/) integration sends markdown-formatted alerts on success or failure when running unattended
@@ -54,7 +56,7 @@ Interactive update script for [Traefik](https://traefik.io/) reverse proxy and [
 **Features:**
 - Auto-detects latest Traefik release from GitHub
 - Updates to latest or a specific version
-- SHA256 checksum verification on every download (supply chain hardening)
+- SHA256 checksum verification on every download — **fail-closed**: a checksum mismatch always aborts, and a *missing* checksum aborts too (in cron) or prompts (interactively) rather than silently installing unverified. Override only with the explicit `--insecure-skip-checksum` flag
 - ARM64 and armv7 architecture auto-detection
 - Automatic backup of current binary before updating
 - Automatic rollback if the new version fails to start
@@ -86,6 +88,7 @@ sudo update-traefik v3.7.0              # Update Traefik to a specific version
 sudo update-traefik --traefik-only      # Update Traefik binary only, skip Manager
 sudo update-traefik --manager-only      # Update Traefik Manager only, skip binary
 sudo update-traefik --check             # Show current vs latest versions, no changes
+sudo update-traefik --insecure-skip-checksum   # Proceed if checksum can't be fetched (NOT recommended)
 sudo update-traefik --rollback          # Restore previous Traefik binary from backup
 sudo update-traefik --changelog         # Show release notes for latest version
 sudo update-traefik --changelog v3.7.0  # Show release notes for specific version
@@ -501,15 +504,26 @@ Or select **"Manage cron schedule"** from the interactive menu. Pick a frequency
 
 ## Notifications
 
-Scripts with scheduling support optional [Gotify](https://gotify.net/) push notifications. When running unattended via cron, they send markdown-formatted alerts on success or failure — complete with tables, status indicators, and host details. Set `GOTIFY_URL` and `GOTIFY_TOKEN` in the script's config block, then verify with:
+Scripts with scheduling support optional [Gotify](https://gotify.net/) push notifications. When running unattended via cron, they send markdown-formatted alerts on success or failure — complete with tables, status indicators, and host details. Notifications are only sent in automated/cron mode; interactive use shows results directly in the terminal.
+
+### Setting it up (the secret-safe way)
+
+Set the **server URL** in the config block (it isn't sensitive), but **seal the token** rather than typing it into the script:
 
 ```bash
+# 1. set GOTIFY_URL="http://your-gotify:80" in the config block (URL only — leave GOTIFY_TOKEN="")
+# 2. seal the token (it's read from stdin, encrypted with systemd-creds, never written in plaintext):
+echo -n "YOUR_GOTIFY_TOKEN" | sudo <script-name> --set-cred gotify-token
+# 3. verify:
 sudo <script-name> --test-notify
 ```
 
-Notifications are only sent in automated/cron mode. Interactive use shows results directly in the terminal.
+This works on **all notification-capable scripts** (`update-traefik`, `pihole-sync`, `nfs-watchdog`, `pve-config-backup`). The token is sealed with `systemd-creds` (TPM-bound where available, host-key-bound otherwise) and falls back to a `chmod 600` file when `systemd-creds` is unavailable. At send time it's passed in a request **header via a `chmod 600` curl config file — never in the URL** (which would leak it into `ps`/process args and proxy logs).
 
-`pve-config-backup` can additionally **seal** its Gotify token (and FTP passwords) with `systemd-creds` instead of keeping them in the config block — see its section above and [`SECURITY.md`](SECURITY.md).
+> [!IMPORTANT]
+> Leave `GOTIFY_TOKEN=""` blank in the config block and use `--set-cred` instead. A plaintext token in a script file is the exact leak the sealing system exists to prevent. The config block still accepts a plaintext token as a fallback for quick testing, but it is **not recommended** for anything persistent.
+
+`pve-config-backup` additionally seals FTP export passwords the same way and offers a guided `--setup` that walks you through URL + token sealing interactively. See [`SECURITY.md`](SECURITY.md) for the threat model and what sealing does (and does not) protect against.
 
 ---
 
