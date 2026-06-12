@@ -67,7 +67,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pve-config-backup"
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.8"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"  # Canonical location (cron runs this path)
@@ -438,7 +438,7 @@ manage_cron() {
         read -rp "  Select [1-2/q]: " cron_choice
         case "$cron_choice" in
             1) ;;
-            2) crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" | crontab -; echo ""; msg_ok "Schedule removed"; echo ""; exit 0 ;;
+            2) { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; } | crontab -; echo ""; msg_ok "Schedule removed"; echo ""; exit 0 ;;
             *) echo ""; exit 0 ;;
         esac
         echo ""
@@ -473,7 +473,7 @@ manage_cron() {
         *) echo ""; exit 0 ;;
     esac
     local NEW_CRON="${CRON_SCHEDULE} ${CRON_CMD}"
-    (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "$NEW_CRON") | crontab -
+    { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "$NEW_CRON"; } | crontab -
     echo ""
     msg_ok "Schedule set: ${GN}${CRON_SCHEDULE}${CL}"
     echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
@@ -523,6 +523,19 @@ target_label() {
     esac
 }
 
+# Stable identity of a target for dedupe — ignores the FTP password/secret field
+# (which is a freshly-generated reference on each add), so two adds of the same
+# FTP server compare equal.
+target_identity() {
+    local spec="$1"
+    if [[ "$spec" == ftp\|* ]]; then
+        local _t host port user _pw path tls; IFS='|' read -r _t host port user _pw path tls <<<"$spec"
+        printf 'ftp|%s|%s|%s|%s|%s' "$host" "$port" "$user" "$path" "$tls"
+    else
+        printf '%s' "$spec"
+    fi
+}
+
 # Create a small local canary file with unique content; return its path.
 make_canary() {
     local f
@@ -532,20 +545,36 @@ make_canary() {
     echo "$f"
 }
 
+# Ensure a dependency is present. If missing: offer to apt-install it when
+# interactive, or fail loud (return 1) when not (cron) — never silently proceed.
+# Usage: require_dep <command-to-test> <apt-package> <friendly-label>
+require_dep() {
+    local cmd="$1" pkg="$2" label="${3:-$2}"
+    if command -v "$cmd" &>/dev/null; then
+        msg_ok "${label} present"
+        return 0
+    fi
+    if [[ "${INTERACTIVE:-true}" == true ]]; then
+        msg_warn "${label} not installed (package: ${pkg})"
+        read -rp "  Install ${pkg} now? [Y/n]: " a
+        if [[ ! "$a" =~ ^[Nn]$ ]]; then
+            if apt-get update -qq >/dev/null 2>&1 && apt-get install -y "$pkg" >/dev/null 2>&1; then
+                msg_ok "${pkg} installed"
+                return 0
+            fi
+            msg_error "Install failed — install ${pkg} manually (apt-get install -y ${pkg})"
+            return 1
+        fi
+        return 1
+    fi
+    # Non-interactive (cron): cannot prompt. Fail loud so the issue is visible.
+    msg_error "${label} missing — install it: apt-get install -y ${pkg}"
+    return 1
+}
+
 # Ensure NFS client tooling is present; offer to install interactively.
 nfs_check_deps() {
-    command -v mount.nfs &>/dev/null && return 0
-    msg_warn "nfs-common not installed (required for NFS targets)"
-    if [[ "${INTERACTIVE:-true}" == true ]]; then
-        read -rp "  Install nfs-common now? [Y/n]: " a
-        if [[ ! "$a" =~ ^[Nn]$ ]]; then
-            if apt-get update -qq >/dev/null 2>&1 && apt-get install -y nfs-common >/dev/null 2>&1; then
-                msg_ok "nfs-common installed"; return 0
-            fi
-            msg_error "Install failed — install nfs-common manually"; return 1
-        fi
-    fi
-    return 1
+    require_dep mount.nfs nfs-common "nfs-common"
 }
 
 # ---- Per-type verify (write -> read back -> delete a canary) ----
@@ -584,6 +613,7 @@ verify_nfs() {
 verify_sftp() {
     local uh="$1" port="$2" path="$3" canary="$4"
     local ok=true cname
+    require_dep scp openssh-client "openssh-client" || return 1
     cname=$(basename "$canary")
     msg_info "Connecting to ${uh}"
     if ssh -o BatchMode=yes -o ConnectTimeout=10 -p "$port" "$uh" "true" 2>/dev/null; then
@@ -606,6 +636,7 @@ verify_sftp() {
 verify_ftp() {
     local host="$1" port="$2" user="$3" pass="$4" path="$5" tls="$6" canary="$7"
     local ok=true cname proto_opt="" conf back base
+    require_dep curl curl "curl" || return 1
     cname=$(basename "$canary")
     # Password may be a literal (new, pre-seal) or an @SECRET:<name> reference.
     pass=$(resolve_secret_ref "$pass") || { msg_error "Could not unseal stored credential"; return 1; }
@@ -706,11 +737,15 @@ targets_add() {
     local spec="" ftp_plain_pass=""
     case "$ty" in
         1)
+            # Dependency gate FIRST — don't collect target details for a transport
+            # whose tooling can't be installed. Stop and make the user resolve it.
+            nfs_check_deps || { msg_error "Resolve nfs-common before adding an NFS target."; echo ""; return; }
             read -rp "  NFS host:export (e.g. 192.168.1.10:/export/backups): " he
             [[ -z "$he" ]] && { msg_error "Nothing entered"; return; }
             read -rp "  Sub-directory under the export (optional, blank = root): " sub
             spec="nfs|${he}|${sub}" ;;
         2)
+            require_dep scp openssh-client "openssh-client" || { msg_error "Resolve openssh-client before adding an SFTP/SCP target."; echo ""; return; }
             read -rp "  user@host (e.g. root@192.168.1.11): " uh
             [[ -z "$uh" ]] && { msg_error "Nothing entered"; return; }
             read -rp "  SSH port [22]: " port; port="${port:-22}"
@@ -718,6 +753,7 @@ targets_add() {
             [[ -z "$path" ]] && { msg_error "No path entered"; return; }
             spec="sftp|${uh}|${port}|${path}" ;;
         3)
+            require_dep curl curl "curl" || { msg_error "Resolve curl before adding an FTP/FTPS target."; echo ""; return; }
             read -rp "  FTP host: " host
             [[ -z "$host" ]] && { msg_error "No host entered"; return; }
             read -rp "  Port [21]: " port; port="${port:-21}"
@@ -748,6 +784,21 @@ targets_add() {
         msg_ok "Target verified successfully"
         read -rp "  Save this target? [Y/n]: " s
         if [[ ! "$s" =~ ^[Nn]$ ]]; then
+            # Dedupe: don't add an identical target twice. Compare on identity
+            # (host/path/port/user), ignoring the FTP secret field which is
+            # always a freshly-generated reference.
+            if [[ -f "$TARGETS_FILE" ]]; then
+                local newid eline
+                newid=$(target_identity "$spec")
+                while IFS= read -r eline; do
+                    [[ -z "$eline" ]] && continue
+                    if [[ "$(target_identity "$eline")" == "$newid" ]]; then
+                        msg_warn "An identical target is already configured — not adding a duplicate."
+                        echo ""
+                        return
+                    fi
+                done < "$TARGETS_FILE"
+            fi
             mkdir -p "$(dirname "$TARGETS_FILE")"; chmod 700 "$(dirname "$TARGETS_FILE")"
             touch "$TARGETS_FILE"; chmod 600 "$TARGETS_FILE"
             # For FTP, seal the password and store a reference — never the literal.
@@ -925,19 +976,49 @@ preflight_checks() {
         CRITICAL=true
     fi
 
-    for dep in tar gzip; do
-        if command -v "$dep" &>/dev/null; then
-            msg_ok "${dep} installed"
-        else
-            msg_error "${dep} not found"
-            CRITICAL=true
-        fi
+    # Core archive tools — offer to install if somehow missing (consistent with
+    # the script's fix-it philosophy), fail loud under cron.
+    for d in "tar tar tar" "gzip gzip gzip"; do
+        set -- $d
+        require_dep "$1" "$2" "$3" || CRITICAL=true
     done
 
     if [[ -f /var/lib/pve-cluster/config.db ]]; then
         msg_ok "pmxcfs database present (config.db)"
     else
         msg_warn "config.db not found — archive will exclude the pmxcfs database"
+    fi
+
+    # Dependencies are checked based on what is actually configured, so a
+    # local-only or SFTP-only user is never nagged about tools they don't need.
+
+    # NFS client tooling — required when an NFS export target exists.
+    if [[ -f "$TARGETS_FILE" ]] && grep -q '^nfs|' "$TARGETS_FILE" 2>/dev/null; then
+        require_dep mount.nfs nfs-common "nfs-common (NFS target configured)" || CRITICAL=true
+    fi
+
+    # curl — required for FTP/FTPS export and for Gotify notifications.
+    if { [[ -f "$TARGETS_FILE" ]] && grep -q '^ftp|' "$TARGETS_FILE" 2>/dev/null; } || [[ -n "$GOTIFY_URL" ]]; then
+        require_dep curl curl "curl (FTP/FTPS export or Gotify configured)" || CRITICAL=true
+    fi
+
+    # ssh/scp — required for key-based SFTP/SCP export (managed targets or REMOTE_TARGETS).
+    if { [[ -f "$TARGETS_FILE" ]] && grep -q '^sftp|' "$TARGETS_FILE" 2>/dev/null; } || [[ -n "$REMOTE_TARGETS" ]]; then
+        require_dep scp openssh-client "openssh-client (SFTP/SCP target configured)" || CRITICAL=true
+    fi
+
+    # Offsite reality check. A config backup that lives ONLY on the node it backs
+    # up dies with that node's disk — defeating the entire purpose of this tool.
+    # Warn loudly (allow local-only, but make the gap impossible to miss).
+    local _has_offsite=false
+    [[ -f "$TARGETS_FILE" ]] && grep -Eq '^(nfs|sftp|ftp)\|' "$TARGETS_FILE" 2>/dev/null && _has_offsite=true
+    [[ -n "$REMOTE_TARGETS" ]] && _has_offsite=true
+    if [[ "$_has_offsite" == true ]]; then
+        msg_ok "Offsite export configured"
+    else
+        msg_warn "No offsite target — this backup is LOCAL ONLY"
+        echo -e "${TAB}  ${YW}If this node's disk fails, the backup is lost with it. Add an${CL}"
+        echo -e "${TAB}  ${YW}offsite copy (NFS/SFTP/FTPS) with:  ${BL}${SCRIPT_NAME} --targets${CL}"
     fi
 
     if [[ -d "$BACKUP_DEST" ]]; then
@@ -1215,7 +1296,11 @@ run_backup() {
 cron_write() {
     local expr="$1"
     local cmd="${SCRIPT_INSTALL_DEST} --cron >> ${LOG_FILE} 2>&1"
-    (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "${expr} ${cmd}") | crontab -
+    # grep -v exits 1 when it filters out every line (empty result); `|| true`
+    # keeps that from tripping pipefail/inherit_errexit and silently aborting.
+    { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "${expr} ${cmd}"; } | crontab -
+    # Verify it actually landed — never report success on a silent write failure.
+    crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"
 }
 
 # True when an executable copy exists at the canonical path (what cron will run).
@@ -1370,8 +1455,11 @@ guided_setup() {
     esac
     if [[ -n "$expr" ]]; then
         if require_installed_for_schedule; then
-            cron_write "$expr"
-            msg_ok "Scheduled: ${GN}${expr}${CL}"
+            if cron_write "$expr"; then
+                msg_ok "Scheduled: ${GN}${expr}${CL}"
+            else
+                msg_error "Schedule write failed — could not update crontab. Is cron installed and running?"
+            fi
         else
             msg_warn "Not scheduled — install the script first, then run --schedule."
         fi
