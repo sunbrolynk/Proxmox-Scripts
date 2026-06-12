@@ -34,9 +34,20 @@ Styled after the [Proxmox VE Community Scripts](https://github.com/community-scr
 ## Scripts
 
 <details>
-<summary><strong>update-traefik</strong> — Update Traefik reverse proxy and Traefik Manager</summary>
+<summary><strong>Update Traefik</strong> — Update Traefik reverse proxy and Traefik Manager</summary>
 
 <br>
+
+<div align="center">
+<pre>
+   ______                _____ __
+  /_  __/________ ____  / __(_) /__
+   / / / ___/ __ `/ _ \/ /_/ / //_/
+  / / / /  / /_/ /  __/ __/ / ,&lt;
+ /_/ /_/   \__,_/\___/_/ /_/_/|_|
+     &amp; Traefik Manager Updater
+</pre>
+</div>
 
 Interactive update script for [Traefik](https://traefik.io/) reverse proxy and [Traefik Manager](https://github.com/chr0nzz/traefik-manager) web UI.
 
@@ -53,6 +64,8 @@ Interactive update script for [Traefik](https://traefik.io/) reverse proxy and [
 - Preflight dependency checks with interactive install of missing packages
 - Detects and offers to start stopped services
 - Built-in cron scheduler with Gotify notifications for automated updates
+- **Sealed Gotify credentials** — the notification token is sealed with `systemd-creds` (or a `chmod 600` fallback) and sent in a request header, never in the URL; seal it with `--set-cred gotify-token`
+- Scheduling is gated on being installed at `/usr/local/bin` (cron runs that exact path), and the cron write is verified rather than assumed
 - CTRL+C safe — cleans up temp files and exits gracefully
 - Shows dashboard URLs on completion
 
@@ -77,6 +90,7 @@ sudo update-traefik --rollback          # Restore previous Traefik binary from b
 sudo update-traefik --changelog         # Show release notes for latest version
 sudo update-traefik --changelog v3.7.0  # Show release notes for specific version
 sudo update-traefik --test-notify       # Test Gotify notification
+sudo update-traefik --set-cred gotify-token  # Seal the Gotify token (reads value from stdin)
 sudo update-traefik --schedule          # Set up, change, or remove cron schedule
 sudo update-traefik -h                  # Full man-style help with config line numbers
 sudo update-traefik -V                  # Show version
@@ -100,7 +114,7 @@ MIN_DISK_MB=500                                  # Minimum disk space warning th
 MIN_MEM_MB=256                                   # Minimum memory warning threshold
 MIN_PYTHON="3.9"                                 # Minimum Python version for Manager
 GOTIFY_URL=""                                    # Gotify server URL (optional)
-GOTIFY_TOKEN=""                                  # Gotify application token (optional)
+GOTIFY_TOKEN=""                                  # Gotify token (optional; prefer sealing via --set-cred gotify-token)
 GOTIFY_PRIORITY=5                                # Notification priority (1-10)
 LOG_FILE="/var/log/update-traefik.log"            # Log file for cron mode
 ```
@@ -108,6 +122,7 @@ LOG_FILE="/var/log/update-traefik.log"            # Log file for cron mode
 **Requirements:**
 - Root access (sudo)
 - `wget`, `curl`, `git` (script offers to install if missing)
+- `systemd-creds` for a sealed Gotify token (present on PVE 8/9; falls back to a `chmod 600` file)
 - Traefik installed as a systemd service
 - Traefik Manager (optional) installed via git clone with a Python virtualenv
 
@@ -116,9 +131,19 @@ LOG_FILE="/var/log/update-traefik.log"            # Log file for cron mode
 ---
 
 <details>
-<summary><strong>pct-force-destroy</strong> — Force destroy LXCs with stale NFS locks</summary>
+<summary><strong>PCT Force Destroy</strong> — Force destroy LXCs with stale NFS locks</summary>
 
 <br>
+
+<div align="center">
+<pre>
+   __              __
+  / /  ___  ____  / /__
+ / /__/ _ \/ __/ /  '_/
+/____/\___/\__/ /_/\_\
+   b r e a k e r
+</pre>
+</div>
 
 Force destroy a Proxmox LXC container that's stuck due to stale locks. This commonly happens when NFS-backed storage timeouts leave orphaned lock files that prevent container deletion.
 
@@ -179,9 +204,19 @@ This makes NFS operations timeout cleanly instead of hanging forever. See [Proxm
 ---
 
 <details>
-<summary><strong>pihole-sync</strong> — Sync Pi-hole config from primary to backup via Teleporter</summary>
+<summary><strong>Pi-hole Sync</strong> — Sync Pi-hole config from primary to backup via Teleporter</summary>
 
 <br>
+
+<div align="center">
+<pre>
+        _ __       __
+   ___ (_) /  ___ / /__
+  / _ \/ / _ \/ _ \ / -_)
+ / .__/_/_//_/\___/_/\__/
+/_/          s y n c
+</pre>
+</div>
 
 Automates Pi-hole configuration sync from a primary instance to one or more backups using the built-in Teleporter CLI. Keeps all Pi-holes identical. Designed for Pi-hole v6+.
 
@@ -195,7 +230,8 @@ Automates Pi-hole configuration sync from a primary instance to one or more back
 - Preflight checks — verifies Pi-hole and SSH on all targets before syncing
 - Local backup archive with configurable retention (default: 7)
 - Gotify notifications on sync success or failure (cron mode only)
-- Built-in cron scheduler — set up automated syncs without cron knowledge
+- **Sealed Gotify credentials** — the token is sealed with `systemd-creds` (or a `chmod 600` fallback) and sent in a request header, never in the URL; seal it with `--set-cred gotify-token`
+- Built-in cron scheduler — set up automated syncs without cron knowledge; scheduling is gated on canonical-path install and the cron write is verified
 - CTRL+C safe — backup Pi-holes are not modified if cancelled
 
 **Prerequisites:**
@@ -229,6 +265,7 @@ sudo pihole-sync --restore /path/to/file  # Restore specific backup file
 sudo pihole-sync --backup-only            # Local backup only, no sync
 sudo pihole-sync --list                   # List stored backups with sizes and dates
 sudo pihole-sync --test-notify            # Test Gotify notification
+sudo pihole-sync --set-cred gotify-token  # Seal the Gotify token (reads value from stdin)
 sudo pihole-sync --schedule               # Set up, change, or remove cron schedule
 sudo pihole-sync -h                       # Full man-style help with config line numbers
 sudo pihole-sync -V                       # Show version
@@ -244,7 +281,7 @@ BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole(s)
 LOCAL_BACKUP_DIR="/var/backups/pihole" # Where to store Teleporter archives
 RETENTION_COUNT=7                     # Number of local backups to keep
 GOTIFY_URL=""                         # Gotify server URL (optional)
-GOTIFY_TOKEN=""                       # Gotify application token (optional)
+GOTIFY_TOKEN=""                       # Gotify token (optional; prefer sealing via --set-cred gotify-token)
 GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 ```
 
@@ -262,9 +299,19 @@ GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 ---
 
 <details>
-<summary><strong>nfs-watchdog</strong> — Monitor NFS mount health across Proxmox cluster nodes</summary>
+<summary><strong>NFS Watchdog</strong> — Monitor NFS mount health across Proxmox cluster nodes</summary>
 
 <br>
+
+<div align="center">
+<pre>
+               __       __    __
+  _    _____ _/ /______/ /   / /__  ___ _
+ | |/|/ / _ `/ __/ __/ _ \ / _ / _ \/ _ `/
+ |__,__/\_,_/\__/\__/_//_//_//_\___/\_, /
+    nfs watchdog                   /___/
+</pre>
+</div>
 
 Detects stale or unresponsive NFS mounts before they cause cascading lock issues and container deletion failures. Tests read, write, and latency on every NFS mount.
 
@@ -277,7 +324,8 @@ Detects stale or unresponsive NFS mounts before they cause cascading lock issues
 - Force remount all mounts on demand
 - Detailed status table with mount options (detects hard vs soft)
 - Gotify notifications with markdown-formatted alerts when stale mounts are found
-- Built-in cron scheduler — set up automated checks without cron knowledge
+- **Sealed Gotify credentials** — the token is sealed with `systemd-creds` (or a `chmod 600` fallback) and sent in a request header, never in the URL; seal it with `--set-cred gotify-token`
+- Built-in cron scheduler — set up automated checks without cron knowledge; scheduling is gated on canonical-path install and the cron write is verified
 - CTRL+C safe
 - Designed to run on every cluster node
 
@@ -305,6 +353,7 @@ sudo nfs-watchdog --status           # Detailed status of all NFS mounts
 sudo nfs-watchdog --dry-run          # Check only, no remount or notify
 sudo nfs-watchdog --remount          # Force remount all NFS mounts
 sudo nfs-watchdog --test-notify      # Test Gotify notification
+sudo nfs-watchdog --set-cred gotify-token  # Seal the Gotify token (reads value from stdin)
 sudo nfs-watchdog --schedule         # Set up, change, or remove cron schedule
 sudo nfs-watchdog -h                 # Full man-style help with config line numbers
 ```
@@ -316,7 +365,7 @@ CHECK_TIMEOUT=5                       # Seconds before declaring a mount stale
 AUTO_REMOUNT=false                    # Auto-remount stale mounts (true/false)
 LOG_FILE="/var/log/nfs-watchdog.log"  # Log file for cron mode
 GOTIFY_URL=""                         # Gotify server URL (optional)
-GOTIFY_TOKEN=""                       # Gotify application token (optional)
+GOTIFY_TOKEN=""                       # Gotify token (optional; prefer sealing via --set-cred gotify-token)
 GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 ```
 
@@ -325,9 +374,19 @@ GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 ---
 
 <details>
-<summary><strong>pve-config-backup</strong> — Back up Proxmox VE host configuration (the gap PBS/vzdump leave)</summary>
+<summary><strong>PVE Config Backup</strong> — Back up Proxmox VE host configuration (the gap PBS/vzdump leave)</summary>
 
 <br>
+
+<div align="center">
+<pre>
+   ___           __ _        ___          _
+  / __|___ _ _  / _(_)__ _  | _ ) __ _ __| |___ _  _ _ __
+ | (__/ _ \ ' \|  _| / _` | | _ \/ _` / _| / / | || | '_ \
+  \___\___/_||_|_| |_\__, | |___/\__,_\__|_\_\\_,_| .__/
+                     |___/                        |_|
+</pre>
+</div>
 
 Proxmox Backup Server and vzdump protect your **guests** (VMs/CTs) — not the **host** itself. If a node's system disk dies, those guest backups don't bring back `/etc/pve`, your networking, storage definitions, cluster membership, users, or apt sources, so recovery means a full reinstall and rebuild from memory. This script captures all of that host-side config into a single dated, `chmod 600` archive so a dead node is a restore, not a reverse-engineering project. It backs up **configuration only — no guest disk images** — so it's safe to run live on a busy node. Runs on a **Proxmox host** (root).
 

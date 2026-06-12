@@ -156,8 +156,24 @@ Targets a Proxmox host (root). Config only, no guest disk images — safe to run
       and the install-nudge state machine) proven on real hardware. 10 findings + 2 feature releases logged.
 - [ ] Optional `sqlite3 .backup` path for a consistent config.db snapshot (decision pending —
       `cp -a` of config.db proved correct in testing; this is a nice-to-have, not a gap)
-- [ ] Decide whether to propagate the sealed-credential helpers to the other three
-      scripts' Gotify tokens (proving-ground first, then promote to script-template.sh)
+- [x] ~~Decide whether to propagate the sealed-credential helpers to the other scripts~~ —
+      **done.** Promoted into script-template.sh v2.0.0 and all three cron-worthy scripts (see below).
+
+### Cross-script convergence — v1.1.0 / template v2.0.0
+
+Promoted config-backup's proven subsystems (hardened cron, sealed Gotify, `require_dep`,
+install-gated scheduling) into the template and the other cron-worthy scripts.
+
+- [x] **script-template.sh → v2.0.0** — hardened `cron_write`, `require_dep`, sealed-credential
+      helpers (dormant unless used), per-script `CRON_PRESETS`, help-table exclusion warning
+- [x] **pi-hole-sync.sh → v1.1.0** — killed URL-token leak, hardened cron, sealing + `--set-cred`
+- [x] **nfs-watchdog.sh → v1.1.0** — same; watchdog intervals (5/10/15/30min/hourly) kept
+- [x] **update-traefik.sh → v1.1.0** — same; update intervals (daily/12h/weekly) kept
+- [x] Two findings logged in SECURITY.md: Gotify URL-token leak (all 3) + cron silent-fail (all 3)
+- [ ] **Hardware-validate all four on the sandbox** — cron-write logic + sealing proven in
+      isolation, but none has run end-to-end on a real box yet. Priority paths per script:
+      empty-crontab schedule write, and `--set-cred gotify-token` → `--test-notify` round-trip.
+- [ ] After validation: update README per-script sections for the new flags/behavior
 
 ## Planned Scripts
 

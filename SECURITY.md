@@ -104,6 +104,18 @@ The entries below come from a full nested-VM hardware-validation pass of `pve-co
 
 > The 1.3.4 finding is the headline. It only reproduces when an earlier menu action (the single-file browser) leaves stale shell state that the later drill-down inherits — a sequence no single-path or unit test exercises. It was caught only because the wizard was driven through a realistic *sequence* of actions on real hardware.
 
+### Cross-script convergence audit (2026-06-12)
+
+After hardening `pve-config-backup.sh`, the proven patterns were promoted into `script-template.sh` (v2.0.0) and the other cron-worthy scripts. The audit surfaced two issues present in **all three** of `pi-hole-sync.sh`, `nfs-watchdog.sh`, and `update-traefik.sh`:
+
+| Date | Script / Version | Finding | Resolution |
+|------|------------------|---------|------------|
+| 2026-06-12 | pi-hole-sync / nfs-watchdog / update-traefik → 1.1.0 | **Gotify token in the URL query string** (`/message?token=${GOTIFY_TOKEN}`). The token appears in `argv`, visible to any local user via `ps`, and is liable to land in proxy/access logs. This is a worse exposure than plaintext-in-a-config-variable | Switched all three to the chmod-600 curl config-header method (`X-Gotify-Key` header in a `-K` file, never in the URL); added sealed-credential support (`--set-cred gotify-token`, resolve-sealed-first) |
+| 2026-06-12 | pi-hole-sync / nfs-watchdog / update-traefik → 1.1.0 | **The cron-write silent-fail bug** (config-backup finding #2) was present in all three: unguarded `crontab -l \| grep -v "$SCRIPT_NAME" \| crontab -` aborts under `pipefail` on an empty crontab, so scheduling silently fails on a fresh node | Applied the hardened `cron_write` (`\|\| true` + verify-it-landed) to both the add and remove pipelines in each; gated scheduling on canonical-path install |
+| 2026-06-12 | script-template.sh → 2.0.0 | The template was **propagating** the cron-write silent-fail bug and a plaintext-Gotify pattern into every new script spawned from it | Template now ships hardened `cron_write`, `require_dep`, sealed-credential helpers (dormant unless a secret is used), per-script `CRON_PRESETS`, and a help-table exclusion warning |
+
+> Lesson worth keeping: a bug in the *template* is a bug multiplier — it ships silently into every future script. Auditing the template is higher-leverage than auditing any single script. The URL-token leak also shows that "we have a notification feature" is a security surface, not just a convenience.
+
 ## Best Practices for Contributors
 
 1. **Keep it simple** — fewer lines of code means fewer places for bugs
