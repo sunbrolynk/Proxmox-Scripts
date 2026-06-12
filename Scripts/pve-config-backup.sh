@@ -67,7 +67,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pve-config-backup"
-SCRIPT_VERSION="1.2.8"
+SCRIPT_VERSION="1.3.1"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"  # Canonical location (cron runs this path)
@@ -182,8 +182,15 @@ show_help() {
     echo -e "${TAB}${TAB}List existing archives in the backup destination with date and size."
     echo ""
     echo -e "${TAB}${GN}--restore ${BL}<file>${CL}"
-    echo -e "${TAB}${TAB}Safely extract an archive to a review directory and print step-by-step"
-    echo -e "${TAB}${TAB}restore guidance. Does NOT overwrite anything in /etc automatically."
+    echo -e "${TAB}${TAB}Safely extract an archive to a review directory and launch the restore"
+    echo -e "${TAB}${TAB}wizard (choose full / category / single-file). Never overwrites /etc"
+    echo -e "${TAB}${TAB}automatically. For scripted/non-interactive use, add one of:"
+    echo -e "${TAB}${TAB}  ${BL}--what <category>${CL}  guests|storage|network|users|ssh|apt|cron"
+    echo -e "${TAB}${TAB}  ${BL}--file <path>${CL}     restore one archive-relative file (e.g. etc/pve/storage.cfg)"
+    echo -e "${TAB}${TAB}  ${BL}--full${CL}            full pmxcfs restore (config.db swap, auto-rollback)"
+    echo -e "${TAB}${TAB}  ${BL}--extract-only${CL}    just extract to the review dir, change nothing"
+    echo -e "${TAB}${TAB}  ${BL}--yes${CL}             skip prompts; auto-run service reloads after a category restore"
+    echo -e "${TAB}${TAB}  ${BL}--force-full${CL}      required to run ${BL}--full${CL} unattended (--yes alone won't)"
     echo ""
     echo -e "${TAB}${GN}--status${CL}"
     echo -e "${TAB}${TAB}Show last backup, archive count, total size, and configured targets."
@@ -1137,6 +1144,253 @@ list_backups() {
 # ============================================================
 # RESTORE (guided — never clobbers /etc automatically)
 # ============================================================
+# Extract an archive to a review dir; echo the dir. Caller handles errors.
+restore_extract() {
+    local archive="$1" review_dir
+    review_dir="/root/pve-config-restore-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$review_dir"; chmod 700 "$review_dir"
+    if tar xzf "$archive" -C "$review_dir" 2>/dev/null; then
+        printf '%s' "$review_dir"
+        return 0
+    fi
+    rm -rf "$review_dir"
+    return 1
+}
+
+# Place a single file from the review dir to its live location, preserving perms.
+# Usage: restore_place <review_dir> <relative-path-under-review> <dest-absolute>
+restore_place() {
+    local review_dir="$1" rel="$2" dest="$3" src="$1/$2"
+    if [[ ! -e "$src" ]]; then msg_error "Not in archive: ${rel}"; return 1; fi
+    mkdir -p "$(dirname "$dest")"
+    if cp -a "$src" "$dest" 2>/dev/null; then
+        msg_ok "Restored ${dest}"
+        return 0
+    fi
+    msg_error "Failed to write ${dest}"
+    return 1
+}
+
+# Category → (review-relative dir, live dir, reload hint). Restores a whole
+# category, or a single picked file within it.
+restore_category() {
+    local review_dir="$1" cat="$2"
+    local rel live reload="" desc
+    case "$cat" in
+        guests)  rel="etc/pve" live="/etc/pve" reload="" desc="Guest configs (VM/CT) — copied into live pmxcfs" ;;
+        storage) rel="etc/pve/storage.cfg" live="/etc/pve/storage.cfg" desc="storage.cfg" ;;
+        network) rel="etc/network" live="/etc/network" reload="ifreload" desc="Networking (/etc/network)" ;;
+        users)   rel="etc/pve/user.cfg" live="/etc/pve/user.cfg" desc="user.cfg (PVE users/permissions)" ;;
+        ssh)     rel="etc/ssh" live="/etc/ssh" reload="sshd" desc="SSH host keys + sshd_config" ;;
+        apt)     rel="etc/apt" live="/etc/apt" desc="APT sources" ;;
+        cron)    rel="etc/cron.d" live="/etc/cron.d" desc="Host cron jobs (/etc/cron.d)" ;;
+        *) msg_error "Unknown category"; return 1 ;;
+    esac
+
+    local src="$review_dir/$rel"
+    if [[ ! -e "$src" ]]; then msg_warn "${desc}: not present in this archive"; return 0; fi
+
+    echo ""
+    echo -e "${TAB}${BD}${desc}${CL}"
+    # If it's a directory, offer whole-category or single-file.
+    if [[ -d "$src" ]]; then
+        echo -e "${TAB}  ${GN}a)${CL} Restore the entire category"
+        echo -e "${TAB}  ${GN}f)${CL} Pick a single file"
+        echo -e "${TAB}  ${RD}c)${CL} Cancel"
+        read -rp "  Choose [a/f/c]: " ch
+        case "$ch" in
+            a)
+                local f rel_f
+                while IFS= read -r f; do
+                    rel_f="${f#$review_dir/}"
+                    restore_place "$review_dir" "$rel_f" "/$rel_f"
+                done < <(find "$src" -type f)
+                ;;
+            f)
+                local files=() i=1 f
+                while IFS= read -r f; do files+=("$f"); done < <(find "$src" -type f | sort)
+                [[ ${#files[@]} -eq 0 ]] && { msg_warn "No files"; return 0; }
+                for f in "${files[@]}"; do echo -e "${TAB}  ${GN}${i})${CL} ${f#$review_dir/}"; i=$((i+1)); done
+                read -rp "  File number to restore: " n
+                [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#files[@]} )) || { msg_error "Invalid"; return 1; }
+                local pick="${files[$((n-1))]}" rel_p="${pick#$review_dir/}"
+                restore_place "$review_dir" "$rel_p" "/$rel_p"
+                ;;
+            *) msg_warn "Cancelled"; return 0 ;;
+        esac
+    else
+        # Single-file category
+        read -rp "  Restore ${desc} to ${live}? [y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] && restore_place "$review_dir" "$rel" "$live" || msg_warn "Skipped"
+    fi
+
+    # Offer the relevant reload.
+    case "$reload" in
+        ifreload) read -rp "  Reload networking now (ifreload -a)? [y/N]: " r
+                  [[ "$r" =~ ^[Yy]$ ]] && { ifreload -a 2>/dev/null && msg_ok "Networking reloaded" || msg_error "ifreload failed — check config before disconnecting!"; } ;;
+        sshd)     read -rp "  Restart sshd now? [y/N]: " r
+                  [[ "$r" =~ ^[Yy]$ ]] && { systemctl restart ssh 2>/dev/null && msg_ok "sshd restarted" || msg_error "sshd restart failed"; } ;;
+    esac
+    return 0
+}
+
+# The invasive one: full pmxcfs restore via config.db swap, fully automatic,
+# with auto-rollback if pve-cluster doesn't come back healthy.
+restore_full_configdb() {
+    local review_dir="$1"
+    local src_db="$review_dir/var/lib/pve-cluster/config.db"
+    local live_db="/var/lib/pve-cluster/config.db"
+
+    if [[ ! -f "$src_db" ]]; then
+        msg_error "This archive has no config.db — cannot do a full pmxcfs restore."
+        return 1
+    fi
+
+    echo ""
+    echo -e "${TAB}${YW}${BD}⚠  FULL pmxcfs RESTORE — this is invasive.${CL}"
+    echo -e "${TAB}It will: stop ${BL}pve-cluster${CL}, replace ${BL}config.db${CL} with the archived copy,"
+    echo -e "${TAB}restart, and verify /etc/pve mounts. Your current config.db is backed up first,"
+    echo -e "${TAB}and automatically rolled back if the service fails to come up."
+    echo ""
+    if [[ -f "$review_dir/etc/corosync/corosync.conf" ]]; then
+        echo -e "${TAB}${YW}Note: archive contains corosync config (node was clustered). In a live"
+        echo -e "${TAB}cluster a rebuilt node normally resyncs from peers on rejoin — only do a"
+        echo -e "${TAB}full config.db restore for a single-node rebuild or whole-cluster recovery.${CL}"
+        echo ""
+    fi
+    if [[ "${RESTORE_ASSUME_FORCED:-false}" == true ]]; then
+        msg_warn "Proceeding unattended (--force-full)."
+    else
+        read -rp "  Type 'RESTORE' to proceed: " confirm
+        [[ "$confirm" == "RESTORE" ]] || { msg_warn "Aborted — nothing changed."; return 1; }
+    fi
+    local backup_db="${live_db}.pre-restore-$(date +%Y%m%d-%H%M%S)"
+    echo ""
+    if [[ -f "$live_db" ]]; then
+        msg_info "Backing up current config.db"
+        cp -a "$live_db" "$backup_db" && msg_ok "Saved current → ${backup_db}" || { msg_error "Could not back up current config.db — aborting"; return 1; }
+    fi
+
+    msg_info "Stopping pve-cluster"
+    if systemctl stop pve-cluster 2>/dev/null; then msg_ok "pve-cluster stopped"; else msg_error "Could not stop pve-cluster — aborting"; return 1; fi
+
+    msg_info "Swapping in archived config.db"
+    if cp -a "$src_db" "$live_db" 2>/dev/null && chmod 600 "$live_db"; then
+        msg_ok "config.db replaced"
+    else
+        msg_error "Swap failed — restoring previous and restarting"
+        [[ -f "$backup_db" ]] && cp -a "$backup_db" "$live_db"
+        systemctl start pve-cluster 2>/dev/null || true
+        return 1
+    fi
+
+    msg_info "Starting pve-cluster"
+    systemctl start pve-cluster 2>/dev/null || true
+    sleep 3
+
+    # Verify health: service active AND /etc/pve populated.
+    if systemctl is-active --quiet pve-cluster && ls /etc/pve/.version &>/dev/null; then
+        msg_ok "pve-cluster healthy — /etc/pve is live"
+        echo ""
+        # Identity files (live on real disk, not pmxcfs) — offer to restore.
+        for idf in etc/hostname etc/hosts; do
+            [[ -f "$review_dir/$idf" ]] && { read -rp "  Restore /${idf}? [y/N]: " r; [[ "$r" =~ ^[Yy]$ ]] && restore_place "$review_dir" "$idf" "/$idf"; }
+        done
+        echo ""
+        msg_ok "Full restore complete. Previous config.db kept at ${backup_db}"
+        return 0
+    fi
+
+    # Unhealthy → auto-rollback.
+    msg_error "pve-cluster did NOT come back healthy — rolling back automatically"
+    systemctl stop pve-cluster 2>/dev/null || true
+    if [[ -f "$backup_db" ]]; then
+        cp -a "$backup_db" "$live_db" && chmod 600 "$live_db" && msg_ok "Rolled back to previous config.db"
+    fi
+    systemctl start pve-cluster 2>/dev/null || true
+    sleep 3
+    if systemctl is-active --quiet pve-cluster; then
+        msg_ok "pve-cluster restarted on the previous config.db — node is as it was."
+    else
+        msg_error "pve-cluster still down after rollback — manual recovery needed. Previous db: ${backup_db}"
+    fi
+    return 1
+}
+
+# Non-interactive restore for CLI / automation. Routes by action without menus.
+# Honors --yes for category/file restores; FULL config.db swap additionally
+# requires --force-full (a typo or wrong archive must not silently swap a node).
+# Args: archive, mode(what|file|full|extract-only), selector, force_full(bool)
+restore_noninteractive() {
+    local archive="$1" mode="$2" selector="${3:-}" force_full="${4:-false}"
+    header_info
+    echo -e "${TAB}${BD}Restore (non-interactive)${CL}"
+    echo ""
+    [[ -f "$archive" ]] || { msg_error "Archive not found: ${archive}"; echo ""; exit 1; }
+
+    msg_info "Extracting to review directory"
+    local review_dir
+    if ! review_dir=$(restore_extract "$archive"); then
+        msg_error "Extraction failed — archive may be corrupt"; echo ""; exit 1
+    fi
+    msg_ok "Extracted to ${review_dir}"
+    echo ""
+
+    case "$mode" in
+        extract-only)
+            msg_ok "Extract-only — nothing restored. Review dir: ${review_dir}"
+            echo ""; exit 0 ;;
+        file)
+            [[ -n "$selector" ]] || { msg_error "--file requires a path (archive-relative, e.g. etc/pve/storage.cfg)"; exit 1; }
+            local rel="${selector#/}"
+            if [[ ! -e "$review_dir/$rel" ]]; then msg_error "Not in archive: ${rel}"; exit 1; fi
+            restore_place "$review_dir" "$rel" "/$rel" || exit 1
+            echo ""; exit 0 ;;
+        what)
+            [[ -n "$selector" ]] || { msg_error "--what requires a category (guests|storage|network|users|ssh|apt|cron)"; exit 1; }
+            # Non-interactive category: restore the whole category, no per-file menu.
+            local rel live reload=""
+            case "$selector" in
+                guests)  rel="etc/pve" live="/etc/pve" ;;
+                storage) rel="etc/pve/storage.cfg" live="/etc/pve/storage.cfg" ;;
+                network) rel="etc/network" live="/etc/network" reload="ifreload" ;;
+                users)   rel="etc/pve/user.cfg" live="/etc/pve/user.cfg" ;;
+                ssh)     rel="etc/ssh" live="/etc/ssh" reload="sshd" ;;
+                apt)     rel="etc/apt" live="/etc/apt" ;;
+                cron)    rel="etc/cron.d" live="/etc/cron.d" ;;
+                *) msg_error "Unknown category: ${selector}"; exit 1 ;;
+            esac
+            local src="$review_dir/$rel"
+            [[ -e "$src" ]] || { msg_warn "${selector}: not present in this archive"; echo ""; exit 0; }
+            if [[ -d "$src" ]]; then
+                local f rel_f
+                while IFS= read -r f; do rel_f="${f#$review_dir/}"; restore_place "$review_dir" "$rel_f" "/$rel_f"; done < <(find "$src" -type f)
+            else
+                restore_place "$review_dir" "$rel" "$live"
+            fi
+            # Reloads are themselves side-effecting; only auto-run when --yes given.
+            if [[ "${AUTO_YES:-false}" == true ]]; then
+                case "$reload" in
+                    ifreload) ifreload -a 2>/dev/null && msg_ok "Networking reloaded" || msg_error "ifreload failed — verify before disconnecting" ;;
+                    sshd)     systemctl restart ssh 2>/dev/null && msg_ok "sshd restarted" || msg_error "sshd restart failed" ;;
+                esac
+            elif [[ -n "$reload" ]]; then
+                msg_warn "Skipped service reload (${reload}) — pass --yes to auto-reload, or do it manually."
+            fi
+            echo ""; exit 0 ;;
+        full)
+            if [[ "$force_full" != true ]]; then
+                msg_error "FULL config.db restore is unattended-unsafe. Re-run with --force-full to confirm you intend an automated pmxcfs swap."
+                echo ""; exit 1
+            fi
+            # force_full bypasses the typed 'RESTORE' gate; rollback net still applies.
+            RESTORE_ASSUME_FORCED=true restore_full_configdb "$review_dir"
+            local rc=$?
+            echo ""; exit $rc ;;
+        *) msg_error "Unknown restore mode"; exit 1 ;;
+    esac
+}
+
 restore_backup() {
     local archive="$1"
     header_info
@@ -1145,52 +1399,72 @@ restore_backup() {
 
     [[ -f "$archive" ]] || { msg_error "Archive not found: ${archive}"; echo ""; exit 1; }
 
-    local review_dir="/root/pve-config-restore-$(date +%Y%m%d-%H%M%S)"
     msg_info "Extracting to review directory"
-    mkdir -p "$review_dir"; chmod 700 "$review_dir"
-    if tar xzf "$archive" -C "$review_dir" 2>/dev/null; then
-        msg_ok "Extracted to ${review_dir}"
-    else
+    local review_dir
+    if ! review_dir=$(restore_extract "$archive"); then
         msg_error "Extraction failed — archive may be corrupt"
-        rm -rf "$review_dir"
-        echo ""
-        exit 1
+        echo ""; exit 1
     fi
+    msg_ok "Extracted to ${review_dir}"
     echo ""
 
-    echo -e "${TAB}${BD}Contents:${CL}"
-    find "$review_dir" -maxdepth 3 -type f 2>/dev/null | sed "s|${review_dir}|  ${TAB}|" | head -40
-    echo ""
-
-    echo -e "${TAB}${YW}${BD}⚠  Read before restoring — do NOT blindly copy everything back.${CL}"
-    echo ""
-    echo -e "${TAB}${BD}For individual configs${CL} (e.g. a single VM/CT, storage.cfg, interfaces):"
-    echo -e "${TAB}  Copy the specific file from ${BL}${review_dir}${CL} into place and reload"
-    echo -e "${TAB}  the relevant service (e.g. ${BL}ifreload -a${CL} for networking)."
-    echo ""
-    echo -e "${TAB}${BD}For a full pmxcfs (/etc/pve) restore on a rebuilt node:${CL}"
-    echo -e "${TAB}  /etc/pve is a live FUSE mount — you cannot just copy files over it."
-    echo -e "${TAB}  The authoritative state lives in config.db. Procedure:"
-    echo ""
-    echo -e "${TAB}    1) Stop the cluster filesystem service:"
-    echo -e "${TAB}       ${BL}systemctl stop pve-cluster${CL}"
-    echo -e "${TAB}    2) Replace the database with the backed-up copy:"
-    echo -e "${TAB}       ${BL}cp ${review_dir}/var/lib/pve-cluster/config.db /var/lib/pve-cluster/config.db${CL}"
-    echo -e "${TAB}       ${BL}chmod 600 /var/lib/pve-cluster/config.db${CL}"
-    echo -e "${TAB}    3) Restore identity files: ${BL}/etc/hostname${CL}, ${BL}/etc/hosts${CL}"
-    echo -e "${TAB}    4) Start the service and verify:"
-    echo -e "${TAB}       ${BL}systemctl start pve-cluster${CL}  ->  ${BL}ls /etc/pve${CL}"
-    echo ""
-    if [[ -f "$review_dir/etc/corosync/corosync.conf" ]]; then
-        echo -e "${TAB}${YW}This archive contains corosync config — node was clustered.${CL}"
-        echo -e "${TAB}  In a cluster, a rebuilt node normally resyncs /etc/pve from peers"
-        echo -e "${TAB}  once it rejoins. Restore config.db only for a single-node rebuild,"
-        echo -e "${TAB}  or when recovering the whole cluster from scratch."
+    while true; do
+        echo -e "${TAB}${BD}What would you like to restore?${CL}"
+        echo -e "${TAB}  ${GN}1)${CL} A specific category (guests, storage, network, users, SSH, apt, cron)"
+        echo -e "${TAB}  ${GN}2)${CL} A single file (browse the archive)"
+        echo -e "${TAB}  ${GN}3)${CL} FULL pmxcfs restore (config.db swap — rebuilt/dead node)"
+        echo -e "${TAB}  ${GN}l)${CL} List archive contents"
+        echo -e "${TAB}  ${RD}q)${CL} Done / quit"
         echo ""
-    fi
-    echo -e "${TAB}${INFO} Review the files first. Remove ${BL}${review_dir}${CL} when done."
-    echo ""
-    exit 0
+        read -rp "  Select [1-3/l/q]: " choice
+        echo ""
+        case "$choice" in
+            1)
+                echo -e "${TAB}${BD}Category:${CL}"
+                echo -e "${TAB}  ${GN}1)${CL} Guests (VM/CT configs)   ${GN}2)${CL} storage.cfg   ${GN}3)${CL} Network"
+                echo -e "${TAB}  ${GN}4)${CL} Users (user.cfg)         ${GN}5)${CL} SSH host keys ${GN}6)${CL} APT sources"
+                echo -e "${TAB}  ${GN}7)${CL} Cron (/etc/cron.d)"
+                read -rp "  Category [1-7]: " c
+                case "$c" in
+                    1) restore_category "$review_dir" guests ;;
+                    2) restore_category "$review_dir" storage ;;
+                    3) restore_category "$review_dir" network ;;
+                    4) restore_category "$review_dir" users ;;
+                    5) restore_category "$review_dir" ssh ;;
+                    6) restore_category "$review_dir" apt ;;
+                    7) restore_category "$review_dir" cron ;;
+                    *) msg_error "Invalid category" ;;
+                esac
+                echo "" ;;
+            2)
+                local files=() i=1 f
+                while IFS= read -r f; do files+=("$f"); done < <(find "$review_dir" -type f ! -name MANIFEST.txt | sort)
+                [[ ${#files[@]} -eq 0 ]] && { msg_warn "No files"; continue; }
+                for f in "${files[@]}"; do echo -e "${TAB}  ${GN}${i})${CL} ${f#$review_dir/}"; i=$((i+1)); done
+                read -rp "  File number to restore: " n
+                if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#files[@]} )); then
+                    local pick="${files[$((n-1))]}" rel_p
+                    rel_p="${pick#$review_dir/}"
+                    read -rp "  Restore /${rel_p} ? [y/N]: " yn
+                    [[ "$yn" =~ ^[Yy]$ ]] && restore_place "$review_dir" "$rel_p" "/$rel_p"
+                else
+                    msg_error "Invalid selection"
+                fi
+                echo "" ;;
+            3)
+                restore_full_configdb "$review_dir"
+                echo "" ;;
+            l)
+                echo -e "${TAB}${BD}Archive contents:${CL}"
+                find "$review_dir" -type f 2>/dev/null | sed "s|${review_dir}|  ${TAB}|" | head -60
+                echo "" ;;
+            q|Q)
+                echo -e "${TAB}${INFO} Review dir kept at ${BL}${review_dir}${CL} — remove it when done."
+                echo ""
+                exit 0 ;;
+            *) msg_error "Invalid option"; echo "" ;;
+        esac
+    done
 }
 
 # ============================================================
@@ -1531,8 +1805,26 @@ while [[ $i -lt ${#ARGS[@]} ]]; do
         --restore)
             if [[ $EUID -ne 0 ]]; then header_info; msg_error "Restore must be run as root (use sudo)"; exit 1; fi
             restore_file="${ARGS[$((i+1))]:-}"
-            [[ -z "$restore_file" ]] && { header_info; msg_error "--restore requires a path to an archive"; exit 1; }
-            restore_backup "$restore_file"
+            [[ -z "$restore_file" || "$restore_file" == --* ]] && { header_info; msg_error "--restore requires a path to an archive"; exit 1; }
+            # Scan the remaining args for restore-mode flags (order-independent).
+            r_mode="" r_selector="" r_force_full=false r_yes=false j=0
+            while [[ $j -lt ${#ARGS[@]} ]]; do
+                case "${ARGS[$j]:-}" in
+                    --what)        r_mode="what"; r_selector="${ARGS[$((j+1))]:-}" ;;
+                    --file)        r_mode="file"; r_selector="${ARGS[$((j+1))]:-}" ;;
+                    --full)        r_mode="full" ;;
+                    --extract-only) r_mode="extract-only" ;;
+                    --force-full)  r_force_full=true ;;
+                    --yes|-y)      r_yes=true ;;
+                esac
+                j=$((j + 1))
+            done
+            if [[ -n "$r_mode" ]]; then
+                AUTO_YES=$r_yes
+                restore_noninteractive "$restore_file" "$r_mode" "$r_selector" "$r_force_full"
+            else
+                restore_backup "$restore_file"
+            fi
             ;;
     esac
     i=$((i + 1))
