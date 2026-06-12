@@ -67,7 +67,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pve-config-backup"
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"  # Canonical location (cron runs this path)
@@ -1292,9 +1292,17 @@ restore_full_configdb() {
     if systemctl is-active --quiet pve-cluster && ls /etc/pve/.version &>/dev/null; then
         msg_ok "pve-cluster healthy — /etc/pve is live"
         echo ""
-        # Identity files (live on real disk, not pmxcfs) — offer to restore.
+        # Identity files (live on real disk, not pmxcfs). In unattended mode
+        # (forced full restore) auto-restore them — a dead-node rebuild wants its
+        # hostname/hosts back without a prompt. Interactive asks per-file.
         for idf in etc/hostname etc/hosts; do
-            [[ -f "$review_dir/$idf" ]] && { read -rp "  Restore /${idf}? [y/N]: " r; [[ "$r" =~ ^[Yy]$ ]] && restore_place "$review_dir" "$idf" "/$idf"; }
+            [[ -f "$review_dir/$idf" ]] || continue
+            if [[ "${RESTORE_ASSUME_FORCED:-false}" == true || "${AUTO_YES:-false}" == true ]]; then
+                restore_place "$review_dir" "$idf" "/$idf"
+            else
+                read -rp "  Restore /${idf}? [y/N]: " r
+                [[ "$r" =~ ^[Yy]$ ]] && restore_place "$review_dir" "$idf" "/$idf"
+            fi
         done
         echo ""
         msg_ok "Full restore complete. Previous config.db kept at ${backup_db}"
