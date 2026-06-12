@@ -67,7 +67,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pve-config-backup"
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.3.4"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"  # Canonical location (cron runs this path)
@@ -1213,7 +1213,9 @@ restore_category() {
                 for f in "${files[@]}"; do echo -e "${TAB}  ${GN}${i})${CL} ${f#$review_dir/}"; i=$((i+1)); done
                 read -rp "  File number to restore: " n
                 [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#files[@]} )) || { msg_error "Invalid"; return 1; }
-                local pick="${files[$((n-1))]}" rel_p="${pick#$review_dir/}"
+                local pick rel_p
+                pick="${files[$((n-1))]}"
+                rel_p="${pick#$review_dir/}"
                 restore_place "$review_dir" "$rel_p" "/$rel_p"
                 ;;
             *) msg_warn "Cancelled"; return 0 ;;
@@ -1813,7 +1815,20 @@ while [[ $i -lt ${#ARGS[@]} ]]; do
         --restore)
             if [[ $EUID -ne 0 ]]; then header_info; msg_error "Restore must be run as root (use sudo)"; exit 1; fi
             restore_file="${ARGS[$((i+1))]:-}"
-            [[ -z "$restore_file" || "$restore_file" == --* ]] && { header_info; msg_error "--restore requires a path to an archive"; exit 1; }
+            if [[ -z "$restore_file" ]]; then
+                header_info; msg_error "--restore requires a path to an archive (none given)"
+                echo -e "${TAB}  e.g. ${BL}${SCRIPT_NAME} --restore ${BACKUP_DEST}/pve-config-$(hostname)-DATE.tar.gz${CL}"
+                exit 1
+            elif [[ "$restore_file" == --* ]]; then
+                header_info; msg_error "Expected an archive path after --restore, but got the flag '${restore_file}'."
+                echo -e "${TAB}  Did a shell variable expand empty? Check it resolved, e.g. ${BL}echo \"\$LATEST\"${CL}"
+                echo -e "${TAB}  Usage: ${BL}${SCRIPT_NAME} --restore <archive> [--what … | --file … | --full --force-full]${CL}"
+                exit 1
+            elif [[ ! -f "$restore_file" ]]; then
+                header_info; msg_error "Archive not found: ${restore_file}"
+                echo -e "${TAB}  List available archives with: ${BL}${SCRIPT_NAME} --list${CL}"
+                exit 1
+            fi
             # Scan the remaining args for restore-mode flags (order-independent).
             r_mode="" r_selector="" r_force_full=false r_yes=false j=0
             while [[ $j -lt ${#ARGS[@]} ]]; do
