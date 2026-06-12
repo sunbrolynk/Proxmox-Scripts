@@ -6,6 +6,12 @@
 #
 # <Longer description of what this does and why.>
 # <Which environment it targets: inside a VM/LXC, or on a Proxmox host.>
+#
+# This template carries the repo's shared conventions as a correct, tested floor:
+# hardened cron scheduling (no silent-fail), on-demand dependency installation
+# (require_dep), and sealed Gotify credentials. Sealing/Gotify stay dormant unless
+# GOTIFY_URL is set, so a script with no notifications pays nothing for them.
+# Delete the subsystems a given script doesn't use.
 
 # ============================================================
 # CONFIGURATION — adjust these for your setup
@@ -13,9 +19,9 @@
 EXAMPLE_TARGET="192.168.1.2"          # <description> (generic placeholder, never real values)
 EXAMPLE_USER="root"                   # <description>
 EXAMPLE_TIMEOUT=5                     # <description>
-# --- Gotify (optional — leave blank to disable notifications) ---
+# --- Gotify (optional — leave URL blank to disable notifications entirely) ---
 GOTIFY_URL=""                         # Gotify server URL (e.g. http://10.0.0.5:80)
-GOTIFY_TOKEN=""                       # Gotify application token
+GOTIFY_TOKEN=""                       # Plaintext token (NOT recommended — prefer: --set-cred gotify-token)
 GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 LOG_FILE="/var/log/<script-name>.log"  # Log file for cron mode
 # ============================================================
@@ -25,9 +31,28 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="<script-name>"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="2.0.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
+
+# State (only used if the script schedules / seals / persists settings)
+STATE_DIR="/etc/${SCRIPT_NAME}"
+SECRETS_DIR="${STATE_DIR}/secrets"
+SETTINGS_FILE="${STATE_DIR}/config.env"
+SECRET_PREFIX="${SCRIPT_NAME}"        # namespacing for systemd-creds --name
+INSTALL_NUDGE_DISMISSED=""
+
+# --- Cron interval presets: SET THESE PER SCRIPT ---
+# A label and a cron expression per line. Pick intervals that make sense for THIS
+# script — a watchdog wants minutes; a backup wants daily/weekly. Keep "Custom".
+CRON_PRESETS=(
+    "Daily at 3:00 AM|0 3 * * *"
+    "Weekly (Sunday 3:00 AM)|0 3 * * 0"
+    "Every 6 hours|0 */6 * * *"
+    "Every hour|0 * * * *"
+    "Every 5 minutes|*/5 * * * *"
+)
 
 # Colors
 RD=$'\033[01;31m'
@@ -45,14 +70,8 @@ TAB="  "
 # Trap CTRL+C
 trap 'echo -e "\n\n${TAB}${YW}⚠  Cancelled by user. No changes made.${CL}\n"; cleanup; exit 0' SIGINT SIGTERM
 
-# Temp files tracking (if the script creates any)
 TEMP_FILES=()
-
-cleanup() {
-    for f in "${TEMP_FILES[@]:-}"; do
-        rm -f "$f" 2>/dev/null
-    done
-}
+cleanup() { for f in "${TEMP_FILES[@]:-}"; do rm -f "$f" 2>/dev/null; done; }
 
 header_info() {
     clear
@@ -76,92 +95,90 @@ msg_error() { echo -e "${BFR}${TAB}${CROSS} ${RD}$1${CL}"; }
 msg_warn()  { echo -e "${BFR}${TAB}${INFO} ${YW}$1${CL}"; }
 
 # ============================================================
-# HELP (man-style)
+# SEALED CREDENTIALS (systemd-creds + chmod-600 fallback)
+# Dormant unless the script actually seals/uses a secret. See PATTERNS.md #14.
 # ============================================================
-show_help() {
-    header_info
-    echo -e "${BD}NAME${CL}"
-    echo -e "${TAB}${SCRIPT_NAME} — <one-line description>"
-    echo ""
-    echo -e "${BD}SYNOPSIS${CL}"
-    echo -e "${TAB}${SCRIPT_NAME} [${BL}OPTIONS${CL}]"
-    echo ""
-    echo -e "${BD}DESCRIPTION${CL}"
-    echo -e "${TAB}<What it does, multiple lines as needed.>"
-    echo ""
-    echo -e "${BD}OPTIONS${CL}"
-    echo -e "${TAB}${GN}(no arguments)${CL}"
-    echo -e "${TAB}${TAB}Launch interactive mode with guided menu."
-    echo ""
-    echo -e "${TAB}${GN}-y, --yes${CL}"
-    echo -e "${TAB}${TAB}Run without prompts (for cron)."
-    echo ""
-    echo -e "${TAB}${GN}--test-notify${CL}"
-    echo -e "${TAB}${TAB}Send a test notification to Gotify."
-    echo ""
-    echo -e "${TAB}${GN}--schedule${CL}"
-    echo -e "${TAB}${TAB}Set up, change, or remove the cron schedule."
-    echo ""
-    echo -e "${TAB}${GN}-h, --help${CL}"
-    echo -e "${TAB}${TAB}Display this help and exit."
-    echo ""
-    echo -e "${TAB}${GN}-V, --version${CL}"
-    echo -e "${TAB}${TAB}Display script version and exit."
-    echo ""
-    echo -e "${BD}CONFIGURATION${CL}"
-    echo -e "${TAB}Edit the variables at the top of this script to match your setup."
-    echo -e "${TAB}File: ${BL}${SCRIPT_PATH}${CL}"
-    echo ""
-    # Dynamic config table with line numbers (see PATTERNS.md). Adjust the
-    # grep -v exclusion list to match the non-config UPPERCASE vars in YOUR script.
-    echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
-    echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
-    while IFS= read -r line; do
-        local linenum var val
-        linenum=$(echo "$line" | cut -d: -f1)
-        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
-        val=$(echo "$line" | cut -d= -f2- | tr -d '"')
-        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
-    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|^[0-9]*:set \|^[0-9]*:shopt \|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|INTERACTIVE\|AUTO_YES\|DRY_RUN' | head -10)
-    echo ""
-    echo -e "${BD}FILES${CL}"
-    echo -e "${TAB}${BL}${LOG_FILE}${CL}"
-    echo -e "${TAB}${TAB}Log output when running in cron/automated mode."
-    echo ""
-    echo -e "${BD}EXIT STATUS${CL}"
-    echo -e "${TAB}${GN}0${CL}  Success"
-    echo -e "${TAB}${RD}1${CL}  Error"
-    echo ""
-    echo -e "${BD}EXAMPLES${CL}"
-    echo -e "${TAB}Interactive:"
-    echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME}${CL}"
-    echo ""
-    echo -e "${TAB}Automated via cron:"
-    echo -e "${TAB}  ${BL}sudo ${SCRIPT_NAME} -y >> ${LOG_FILE} 2>&1${CL}"
-    echo ""
-    echo -e "${BD}SEE ALSO${CL}"
-    echo -e "${TAB}Project repo:  ${BL}${SCRIPT_URL}${CL}"
-    echo ""
-    echo -e "${BD}LICENSE${CL}"
-    echo -e "${TAB}MIT — ${SCRIPT_URL}/blob/main/LICENSE"
-    echo ""
-    exit 0
+have_systemd_creds() { command -v systemd-creds &>/dev/null; }
+
+# Seal a secret (value on stdin) under a logical name. Echoes the method used.
+secret_set() {
+    local name="$1" value
+    value="$(cat)"
+    mkdir -p "$SECRETS_DIR"; chmod 700 "$SECRETS_DIR"
+    if have_systemd_creds; then
+        if printf '%s' "$value" | systemd-creds encrypt --name="${SECRET_PREFIX}-${name}" - "${SECRETS_DIR}/${name}.cred" 2>/dev/null; then
+            chmod 600 "${SECRETS_DIR}/${name}.cred"
+            rm -f "${SECRETS_DIR}/${name}.secret" 2>/dev/null || true
+            echo "systemd-creds"; return 0
+        fi
+    fi
+    printf '%s' "$value" > "${SECRETS_DIR}/${name}.secret"
+    chmod 600 "${SECRETS_DIR}/${name}.secret"
+    rm -f "${SECRETS_DIR}/${name}.cred" 2>/dev/null || true
+    echo "file-600"; return 0
+}
+
+secret_get() {
+    local name="$1"
+    if [[ -f "${SECRETS_DIR}/${name}.cred" ]] && have_systemd_creds; then
+        systemd-creds decrypt --name="${SECRET_PREFIX}-${name}" "${SECRETS_DIR}/${name}.cred" - 2>/dev/null && return 0
+    fi
+    if [[ -f "${SECRETS_DIR}/${name}.secret" ]]; then cat "${SECRETS_DIR}/${name}.secret"; return 0; fi
+    return 1
+}
+
+secret_exists() { [[ -f "${SECRETS_DIR}/$1.cred" || -f "${SECRETS_DIR}/$1.secret" ]]; }
+secret_method() { [[ -f "${SECRETS_DIR}/$1.cred" ]] && echo "systemd-creds (sealed)" || { [[ -f "${SECRETS_DIR}/$1.secret" ]] && echo "file-600" || echo "none"; }; }
+
+# Resolve the Gotify token: prefer a sealed secret, else the plaintext config var.
+resolve_gotify_token() {
+    if secret_exists gotify-token; then secret_get gotify-token; else printf '%s' "$GOTIFY_TOKEN"; fi
 }
 
 # ============================================================
-# GOTIFY (secure — token never in process args)
+# SETTINGS FILE (whitelist-parsed, never sourced). See PATTERNS.md #15.
 # ============================================================
+load_settings() {
+    [[ -f "$SETTINGS_FILE" ]] || return 0
+    local line key val
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        key="${line%%=*}"; val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
+        case "$key" in
+            GOTIFY_URL)              GOTIFY_URL="$val" ;;
+            GOTIFY_PRIORITY)         GOTIFY_PRIORITY="$val" ;;
+            INSTALL_NUDGE_DISMISSED) INSTALL_NUDGE_DISMISSED="$val" ;;
+        esac
+    done < "$SETTINGS_FILE"
+}
+
+settings_set() {
+    local key="$1" val="$2" tmp
+    mkdir -p "$(dirname "$SETTINGS_FILE")"; chmod 700 "$(dirname "$SETTINGS_FILE")"
+    touch "$SETTINGS_FILE"; chmod 600 "$SETTINGS_FILE"
+    tmp=$(mktemp /tmp/.cfg-set-XXXXXX); TEMP_FILES+=("$tmp")
+    grep -v "^${key}=" "$SETTINGS_FILE" > "$tmp" 2>/dev/null || true
+    echo "${key}=\"${val}\"" >> "$tmp"
+    cat "$tmp" > "$SETTINGS_FILE"; chmod 600 "$SETTINGS_FILE"; rm -f "$tmp"
+}
+
+# ============================================================
+# GOTIFY (secure — token in a chmod-600 curl config header, never in argv)
+# ============================================================
+gotify_configured() {
+    [[ -n "$GOTIFY_URL" ]] || return 1
+    secret_exists gotify-token && return 0
+    [[ -n "$GOTIFY_TOKEN" ]]
+}
+
 send_gotify() {
     local title="$1" message="$2" priority="${3:-$GOTIFY_PRIORITY}"
-    [[ -z "$GOTIFY_URL" || -z "$GOTIFY_TOKEN" ]] && return 0
-
-    local json_message curl_conf
-    json_message=$(echo "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "\"${message}\"")
-    curl_conf=$(mktemp /tmp/.gotify-XXXXXX); chmod 600 "$curl_conf"
-    cat > "$curl_conf" <<CURLEOF
-header = "X-Gotify-Key: ${GOTIFY_TOKEN}"
-header = "Content-Type: application/json"
-CURLEOF
+    gotify_configured || return 0
+    local token curl_conf json_message
+    token="$(resolve_gotify_token)"; [[ -z "$token" ]] && return 0
+    json_message=$(printf '%s' "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || printf '"%s"' "$message")
+    curl_conf=$(mktemp /tmp/.gotify-XXXXXX); chmod 600 "$curl_conf"; TEMP_FILES+=("$curl_conf")
+    printf 'header = "X-Gotify-Key: %s"\nheader = "Content-Type: application/json"\n' "$token" > "$curl_conf"
     curl -s -K "$curl_conf" -X POST "${GOTIFY_URL}/message" \
         -d "{\"title\":\"${title}\",\"message\":${json_message},\"priority\":${priority},\"extras\":{\"client::display\":{\"contentType\":\"text/markdown\"}}}" &>/dev/null || true
     rm -f "$curl_conf"
@@ -172,128 +189,243 @@ test_gotify() {
     echo -e "${TAB}${BD}Gotify Notification Test${CL}"
     echo ""
     [[ -z "$GOTIFY_URL" ]] && { msg_error "GOTIFY_URL not configured"; echo ""; exit 1; }
-    [[ -z "$GOTIFY_TOKEN" ]] && { msg_error "GOTIFY_TOKEN not configured"; echo ""; exit 1; }
+    require_dep curl curl "curl" || { echo ""; exit 1; }
+    local token; token="$(resolve_gotify_token)"
+    [[ -z "$token" ]] && { msg_error "No Gotify token (set one with: ${SCRIPT_NAME} --set-cred gotify-token)"; echo ""; exit 1; }
 
-    local test_message="### ✅ Connection Successful
+    msg_info "Sending test notification to ${GOTIFY_URL}"
+    local curl_conf json_message response test_message
+    test_message="### ✅ Connection Successful
 
 **Script:** \`${SCRIPT_NAME}\`
 **Host:** \`$(hostname)\`
 **Time:** $(date '+%Y-%m-%d %H:%M:%S')
 
----
-
 *${SCRIPT_NAME} is configured and ready to send alerts.*"
-
-    msg_info "Sending test notification to ${GOTIFY_URL}"
-    local curl_conf json_message response
-    curl_conf=$(mktemp /tmp/.gotify-XXXXXX); chmod 600 "$curl_conf"
-    cat > "$curl_conf" <<CURLEOF
-header = "X-Gotify-Key: ${GOTIFY_TOKEN}"
-header = "Content-Type: application/json"
-CURLEOF
-    json_message=$(echo "$test_message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+    curl_conf=$(mktemp /tmp/.gotify-XXXXXX); chmod 600 "$curl_conf"; TEMP_FILES+=("$curl_conf")
+    printf 'header = "X-Gotify-Key: %s"\nheader = "Content-Type: application/json"\n' "$token" > "$curl_conf"
+    json_message=$(printf '%s' "$test_message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
     response=$(curl -s -o /dev/null -w "%{http_code}" -K "$curl_conf" -X POST "${GOTIFY_URL}/message" \
         -d "{\"title\":\"🔔 ${SCRIPT_NAME} — Test\",\"message\":${json_message},\"priority\":${GOTIFY_PRIORITY},\"extras\":{\"client::display\":{\"contentType\":\"text/markdown\"}}}" 2>/dev/null)
     rm -f "$curl_conf"
-
-    if [[ "$response" == "200" ]]; then
-        msg_ok "Test notification sent successfully"
-    else
-        msg_error "Notification failed (HTTP ${response})"
-    fi
+    [[ "$response" == "200" ]] && msg_ok "Test notification sent successfully" || msg_error "Notification failed (HTTP ${response})"
     echo ""
     exit 0
 }
 
 # ============================================================
-# CRON SCHEDULE MANAGER
+# DEPENDENCIES (on-demand). See PATTERNS.md #18.
+# require_dep <command> <apt-package> <friendly-label>
+# Offers install when interactive; fails loud (returns 1) under cron.
 # ============================================================
+require_dep() {
+    local cmd="$1" pkg="$2" label="${3:-$2}"
+    if command -v "$cmd" &>/dev/null; then msg_ok "${label} present"; return 0; fi
+    if [[ "${INTERACTIVE:-true}" == true ]]; then
+        msg_warn "${label} not installed (package: ${pkg})"
+        read -rp "  Install ${pkg} now? [Y/n]: " a
+        if [[ ! "$a" =~ ^[Nn]$ ]]; then
+            if apt-get update -qq >/dev/null 2>&1 && apt-get install -y "$pkg" >/dev/null 2>&1; then
+                msg_ok "${pkg} installed"; return 0
+            fi
+            msg_error "Install failed — install ${pkg} manually (apt-get install -y ${pkg})"; return 1
+        fi
+        return 1
+    fi
+    msg_error "${label} missing — install it: apt-get install -y ${pkg}"
+    return 1
+}
+
+# ============================================================
+# CRON SCHEDULE MANAGER (hardened — no silent-fail). See PATTERNS.md #9.
+# ============================================================
+# Write/replace this script's cron entry, then VERIFY it landed.
+# `|| true` keeps an empty grep result from tripping pipefail and aborting silently.
+cron_write() {
+    local expr="$1"
+    local cmd="${SCRIPT_INSTALL_DEST} -y >> ${LOG_FILE} 2>&1"
+    { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "${expr} ${cmd}"; } | crontab -
+    crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"   # verify, never assume success
+}
+
+cron_remove() {
+    { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; } | crontab -
+}
+
+installed_ok() { [[ -f "$SCRIPT_INSTALL_DEST" && -x "$SCRIPT_INSTALL_DEST" ]]; }
+
+install_self() {
+    if [[ "$SCRIPT_PATH" == "$SCRIPT_INSTALL_DEST" ]]; then
+        chmod 755 "$SCRIPT_INSTALL_DEST" 2>/dev/null || true
+        msg_ok "Already at ${SCRIPT_INSTALL_DEST} (ensured executable)"; return 0
+    fi
+    if cp "$SCRIPT_PATH" "$SCRIPT_INSTALL_DEST" 2>/dev/null && chmod 755 "$SCRIPT_INSTALL_DEST"; then
+        msg_ok "Installed to ${SCRIPT_INSTALL_DEST} (chmod 755)"; return 0
+    fi
+    msg_warn "Could not install to ${SCRIPT_INSTALL_DEST}"; return 1
+}
+
+# Scheduling needs the script at the canonical path (cron runs that exact path).
+require_installed_for_schedule() {
+    installed_ok && return 0
+    echo ""
+    msg_warn "Scheduling needs the script at ${SCRIPT_INSTALL_DEST} — cron runs that exact path."
+    read -rp "  Install it there now? [Y/n]: " a
+    if [[ ! "$a" =~ ^[Nn]$ ]]; then
+        install_self && { settings_set INSTALL_NUDGE_DISMISSED ""; INSTALL_NUDGE_DISMISSED=""; return 0; }
+        return 1
+    fi
+    msg_warn "Cannot schedule without installing first."
+    return 1
+}
+
 manage_cron() {
     header_info
     echo -e "${TAB}${BD}Schedule Manager${CL}"
     echo ""
-    local CRON_CMD="/usr/local/bin/${SCRIPT_NAME} -y >> ${LOG_FILE} 2>&1"
-    local CURRENT_CRON
-    CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
-
-    if [[ -n "$CURRENT_CRON" ]]; then
-        echo -e "${TAB}  ${GN}Current schedule:${CL}"
-        echo -e "${TAB}  ${BL}${CURRENT_CRON}${CL}"
+    local current
+    current=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
+    if [[ -n "$current" ]]; then
+        echo -e "${TAB}  ${GN}Current:${CL} ${BL}${current}${CL}"
         echo ""
-        echo -e "${TAB}  ${GN}1)${CL} Change schedule"
-        echo -e "${TAB}  ${GN}2)${CL} Remove schedule"
-        echo -e "${TAB}  ${RD}q)${CL} Back"
+        echo -e "${TAB}  ${GN}1)${CL} Change schedule    ${GN}2)${CL} Remove schedule    ${RD}q)${CL} Back"
         echo ""
-        read -rp "  Select [1-2/q]: " cron_choice
-        case "$cron_choice" in
+        read -rp "  Select [1-2/q]: " c
+        case "$c" in
             1) ;;
-            2) crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" | crontab -; echo ""; msg_ok "Schedule removed"; echo ""; exit 0 ;;
+            2) cron_remove; echo ""; msg_ok "Schedule removed"; echo ""; exit 0 ;;
             *) echo ""; exit 0 ;;
         esac
         echo ""
     else
-        echo -e "${TAB}  ${YW}No schedule configured${CL}"
-        echo ""
+        echo -e "${TAB}  ${YW}No schedule configured${CL}"; echo ""
     fi
+
+    # Gate on being installed at the canonical path.
+    require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
 
     echo -e "${TAB}  ${BD}How often should ${SCRIPT_NAME} run?${CL}"
     echo ""
-    echo -e "${TAB}  ${GN}1)${CL} Daily at 3:00 AM"
-    echo -e "${TAB}  ${GN}2)${CL} Daily at custom time"
-    echo -e "${TAB}  ${GN}3)${CL} Every 6 hours"
-    echo -e "${TAB}  ${GN}4)${CL} Every hour"
-    echo -e "${TAB}  ${GN}5)${CL} Every 5 minutes"
-    echo -e "${TAB}  ${GN}6)${CL} Custom cron expression"
+    local i=1 label expr
+    for entry in "${CRON_PRESETS[@]}"; do
+        label="${entry%%|*}"
+        echo -e "${TAB}  ${GN}${i})${CL} ${label}"
+        i=$((i+1))
+    done
+    echo -e "${TAB}  ${GN}${i})${CL} Custom cron expression"
     echo -e "${TAB}  ${RD}q)${CL} Cancel"
     echo ""
-    read -rp "  Select [1-6/q]: " schedule_choice
-    local CRON_SCHEDULE=""
-    case "$schedule_choice" in
-        1) CRON_SCHEDULE="0 3 * * *" ;;
-        2)
-            read -rp "  Hour (0-23): " cron_hour
-            read -rp "  Minute (0-59): " cron_min
-            [[ "$cron_hour" =~ ^[0-9]+$ && "$cron_hour" -le 23 ]] || { msg_error "Invalid hour"; exit 1; }
-            [[ "$cron_min" =~ ^[0-9]+$ && "$cron_min" -le 59 ]] || { msg_error "Invalid minute"; exit 1; }
-            CRON_SCHEDULE="${cron_min} ${cron_hour} * * *" ;;
-        3) CRON_SCHEDULE="0 */6 * * *" ;;
-        4) CRON_SCHEDULE="0 * * * *" ;;
-        5) CRON_SCHEDULE="*/5 * * * *" ;;
-        6) read -rp "  Cron expression: " CRON_SCHEDULE; [[ -z "$CRON_SCHEDULE" ]] && { msg_error "No expression"; exit 1; } ;;
-        *) echo ""; exit 0 ;;
-    esac
-    local NEW_CRON="${CRON_SCHEDULE} ${CRON_CMD}"
-    (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "$NEW_CRON") | crontab -
+    read -rp "  Select [1-${i}/q]: " choice
+    local cron_expr=""
+    if [[ "$choice" == "q" || "$choice" == "Q" ]]; then echo ""; exit 0; fi
+    if [[ "$choice" == "$i" ]]; then
+        read -rp "  Cron expression (e.g. '0 3 * * *'): " cron_expr
+        [[ -z "$cron_expr" ]] && { msg_error "No expression"; exit 1; }
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice>=1 && choice<i )); then
+        cron_expr="${CRON_PRESETS[$((choice-1))]#*|}"
+    else
+        msg_error "Invalid selection"; exit 1
+    fi
+
     echo ""
-    msg_ok "Schedule set: ${GN}${CRON_SCHEDULE}${CL}"
-    echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+    if cron_write "$cron_expr"; then
+        msg_ok "Schedule set: ${GN}${cron_expr}${CL}"
+        echo -e "${TAB}  ${BL}${cron_expr} ${SCRIPT_INSTALL_DEST} -y >> ${LOG_FILE} 2>&1${CL}"
+    else
+        msg_error "Schedule write failed — could not update crontab. Is cron installed and running?"
+    fi
     echo ""
     exit 0
 }
 
 # ============================================================
-# PREFLIGHT CHECKS
+# CRED-SET (seal a secret from stdin/TTY — automation-friendly)
+# ============================================================
+do_set_cred() {
+    local name="$1"
+    [[ -z "$name" ]] && { header_info; msg_error "--set-cred requires a name (e.g. gotify-token)"; exit 1; }
+    local method
+    if [[ -t 0 ]]; then
+        read -rsp "Enter value for '${name}': " _v; echo "" >&2
+        method=$(printf '%s' "$_v" | secret_set "$name")
+    else
+        method=$(secret_set "$name")
+    fi
+    echo "Sealed '${name}' via ${method}" >&2
+    exit 0
+}
+
+# ============================================================
+# HELP (man-style)
+# ============================================================
+show_help() {
+    header_info
+    echo -e "${BD}NAME${CL}"
+    echo -e "${TAB}${SCRIPT_NAME} — <one-line description>"
+    echo ""
+    echo -e "${BD}SYNOPSIS${CL}"
+    echo -e "${TAB}${SCRIPT_NAME} [${BL}OPTIONS${CL}]"
+    echo ""
+    echo -e "${BD}OPTIONS${CL}"
+    echo -e "${TAB}${GN}(no arguments)${CL}  Launch interactive mode with guided menu."
+    echo -e "${TAB}${GN}-y, --yes${CL}        Run without prompts (for cron)."
+    echo -e "${TAB}${GN}--schedule${CL}       Set up, change, or remove the cron schedule."
+    echo -e "${TAB}${GN}--test-notify${CL}    Send a test notification to Gotify."
+    echo -e "${TAB}${GN}--set-cred ${BL}<name>${CL}  Seal a secret (e.g. gotify-token) via systemd-creds."
+    echo -e "${TAB}${GN}-h, --help${CL}       Display this help and exit."
+    echo -e "${TAB}${GN}-V, --version${CL}    Display script version and exit."
+    echo ""
+    echo -e "${BD}CONFIGURATION${CL}"
+    echo -e "${TAB}Edit the variables at the top of this script. File: ${BL}${SCRIPT_PATH}${CL}"
+    echo ""
+    echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
+    echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
+    # IMPORTANT: add every runtime/UPPERCASE non-config var of YOUR script to the
+    # grep -v exclusion list below, or it will leak into this table (see finding #1).
+    while IFS= read -r line; do
+        local linenum var val
+        linenum=$(echo "$line" | cut -d: -f1)
+        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
+        val=$(echo "$line" | cut -d= -f2- | tr -d '"')
+        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
+    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|SECRET_\|STATE_\|SECRETS_\|SETTINGS_\|CRON_PRESETS\|INSTALL_NUDGE\|^[0-9]*:set \|^[0-9]*:shopt \|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|INTERACTIVE\|AUTO_YES\|DRY_RUN' | head -10)
+    echo ""
+    echo -e "${BD}FILES${CL}"
+    echo -e "${TAB}${BL}${SCRIPT_INSTALL_DEST}${CL}   Canonical install location (what cron runs)."
+    echo -e "${TAB}${BL}${LOG_FILE}${CL}   Log output in cron/automated mode."
+    echo -e "${TAB}${BL}${SECRETS_DIR}/${CL}   Sealed credentials (chmod 600)."
+    echo ""
+    echo -e "${BD}EXIT STATUS${CL}"
+    echo -e "${TAB}${GN}0${CL}  Success    ${RD}1${CL}  Error"
+    echo ""
+    echo -e "${BD}EXAMPLES${CL}"
+    echo -e "${TAB}Interactive:        ${BL}sudo ${SCRIPT_NAME}${CL}"
+    echo -e "${TAB}Automated via cron: ${BL}sudo ${SCRIPT_NAME} -y >> ${LOG_FILE} 2>&1${CL}"
+    echo -e "${TAB}Seal Gotify token:  ${BL}sudo ${SCRIPT_NAME} --set-cred gotify-token${CL}"
+    echo ""
+    echo -e "${BD}LICENSE${CL}"
+    echo -e "${TAB}MIT — ${SCRIPT_URL}/blob/main/LICENSE"
+    echo ""
+    exit 0
+}
+
+# ============================================================
+# PREFLIGHT CHECKS (on-demand deps; gate by what's configured)
 # ============================================================
 preflight_checks() {
     echo -e "${TAB}${BL}Preflight Checks${CL}"
     echo ""
     local CRITICAL=false
 
-    # Example: check required commands exist
-    for dep in curl; do
-        if command -v "$dep" &>/dev/null; then
-            msg_ok "${dep} installed"
-        else
-            msg_error "${dep} not found"
-            CRITICAL=true
-        fi
-    done
+    # Example: a dependency this script ALWAYS needs.
+    # require_dep curl curl "curl" || CRITICAL=true
+
+    # Example: a dependency needed ONLY when a feature is configured.
+    # if [[ -n "$GOTIFY_URL" ]]; then require_dep curl curl "curl (Gotify configured)" || CRITICAL=true; fi
 
     echo ""
     if [[ "$CRITICAL" == true ]]; then
-        msg_error "Preflight checks failed"
-        echo ""
-        exit 1
+        msg_error "Preflight checks failed"; echo ""; exit 1
     fi
     msg_ok "All preflight checks passed"
     echo ""
@@ -311,51 +443,72 @@ do_work() {
 # ============================================================
 # MAIN
 # ============================================================
+load_settings   # pull GOTIFY_URL etc. from SETTINGS_FILE if present
 
-# Early exit for help, version, and read-only info flags
-for arg in "${@:-}"; do
+# Early exit for help, version, and read-only / one-shot flags
+ARGS=("${@:-}")
+for arg in "${ARGS[@]}"; do
     case "${arg:-}" in
         --help|-h) show_help ;;
         --version|-V) echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"; echo "${SCRIPT_URL}"; exit 0 ;;
+    esac
+done
+
+# Root check (remove if the script doesn't need root)
+if [[ $EUID -ne 0 ]]; then
+    header_info; msg_error "This script must be run as root (use sudo)"; exit 1
+fi
+
+# These flags need root, so they come after the root check.
+i=0
+while [[ $i -lt ${#ARGS[@]} ]]; do
+    case "${ARGS[$i]:-}" in
         --test-notify) test_gotify ;;
         --schedule) manage_cron ;;
+        --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
     esac
+    i=$((i+1))
 done
 
 header_info
 
-# Root check (remove if the script doesn't need root)
-if [[ $EUID -ne 0 ]]; then
-    msg_error "This script must be run as root (use sudo)"
-    exit 1
-fi
-
-# Parse flags
+# Parse run-mode flags
 AUTO_YES=false
 INTERACTIVE=true
-for arg in "${@:-}"; do
+for arg in "${ARGS[@]}"; do
     case "${arg:-}" in
         --yes|-y) AUTO_YES=true; INTERACTIVE=false ;;
     esac
 done
 
-# Preflight
+# One-time install nudge (interactive only) — offer the canonical path so cron works.
+if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSED" != "1" ]]; then
+    echo -e "${TAB}${YW}Heads up: this script isn't installed at ${SCRIPT_INSTALL_DEST}.${CL}"
+    echo -e "${TAB}Installing it there is what lets the cron / --schedule feature run unattended."
+    echo ""
+    read -rp "  Install it there now? [Y/n]: " _ans
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then install_self || true
+    else msg_warn "Skipped — scheduling stays disabled until installed. I won't ask again."
+         settings_set INSTALL_NUDGE_DISMISSED "1"; INSTALL_NUDGE_DISMISSED="1"; fi
+    echo ""
+fi
+
 preflight_checks
 
-# Interactive menu
+# Interactive menu (every flag is also a menu item)
 if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}${BL}What would you like to do?${CL}"
     echo ""
     echo -e "${TAB}  ${GN}1)${CL} Run the main action"
-    echo -e "${TAB}  ${GN}2)${CL} Test Gotify notification"
-    echo -e "${TAB}  ${GN}3)${CL} Manage cron schedule"
+    echo -e "${TAB}  ${GN}2)${CL} Manage cron schedule"
+    echo -e "${TAB}  ${GN}3)${CL} Test Gotify notification"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
     read -rp "  Select an option [1-3/q]: " choice
     case "$choice" in
         1) ;;
-        2) test_gotify ;;
-        3) manage_cron ;;
+        2) manage_cron ;;
+        3) test_gotify ;;
         q|Q) echo ""; msg_ok "Exiting. No changes made."; echo ""; exit 0 ;;
         *) msg_error "Invalid option"; exit 1 ;;
     esac
@@ -365,10 +518,8 @@ fi
 echo -e "${TAB}${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 echo ""
 
-# Do the work
 do_work
 
-# Summary + optional notification (only in automated mode)
 echo ""
 echo -e "${TAB}${GN}✓ Complete!${CL}"
 echo ""

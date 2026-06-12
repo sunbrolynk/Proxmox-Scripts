@@ -193,7 +193,7 @@ Not every script needs these, but when a script must store a replayable secret, 
 | pct-force-destroy.sh | Force destroy LXCs with stale NFS locks | Active |
 | pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active |
 | nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active |
-| pve-config-backup.sh | Back up Proxmox VE host config (the gap PBS/vzdump leave) | Active |
+| pve-config-backup.sh | Back up Proxmox VE host config (the gap PBS/vzdump leave); guided restore wizard + scriptable restore CLI | Active — **v1.3.4**, hardware-validated |
 
 ## Architecture Notes
 

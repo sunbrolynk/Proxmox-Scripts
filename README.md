@@ -340,7 +340,8 @@ Proxmox Backup Server and vzdump protect your **guests** (VMs/CTs) — not the *
 - **Sealed credentials** — FTP passwords and the Gotify token are sealed with `systemd-creds` (TPM-bound where the host has a TPM, host-key-bound otherwise), falling back to a `chmod 600` file when `systemd-creds` is unavailable. No plaintext secret is written to disk, and credentials never live in the script
 - **Guided one-time setup** (`--setup`, a menu item, or auto-offered on first run): takes the first backup, then optionally walks you through an export target, Gotify, and a schedule — after that it runs hands-off and the only thing you return for is a restore
 - **Self-installs** to `/usr/local/bin` (offered once at startup if you ran it from elsewhere) so the cron path resolves; scheduling is gated on being installed
-- **Guided restore** (`--restore <file>`) extracts to a review directory and prints the exact pmxcfs / `config.db` recovery procedure — it never overwrites anything in `/etc` automatically
+- **Guided restore wizard** (`--restore <file>`) extracts to a review directory, then lets you choose what to bring back — the whole config, a category (guests, storage, network, users, SSH, apt, cron), or a single file — and **does the placement and service reloads for you**. The full-node path (`config.db` swap) stops `pve-cluster`, swaps the database, restarts, verifies `/etc/pve` mounts, and **automatically rolls back** if the service doesn't come up healthy. It is gated behind typing `RESTORE` and never touches anything until you confirm.
+- **Scriptable restore** for power users and automation: `--what <category>`, `--file <path>`, `--full`, and `--extract-only`, with `--yes` to skip prompts. The invasive full restore additionally requires `--force-full` to run unattended — `--yes` alone won't trigger a config.db swap, so a cron typo can't silently re-identify a node.
 - Cluster-aware — detects corosync config and tailors restore guidance for single-node rebuild vs. cluster rejoin
 - Gotify notification on backup success/failure (cron mode), `--test-notify`
 - Non-interactive credential provisioning (`--set-cred`) for automation — seal a secret from stdin with no plaintext on disk
@@ -370,7 +371,11 @@ sudo pve-config-backup -y                 # Back up without prompts (for cron)
 sudo pve-config-backup --cron             # Same as -y; fires Gotify if configured
 sudo pve-config-backup --targets          # Add / test / remove export targets (NFS/SFTP/FTPS)
 sudo pve-config-backup --list             # List archives with sizes and dates
-sudo pve-config-backup --restore <file>   # Guided restore (extract + step-by-step instructions)
+sudo pve-config-backup --restore <file>   # Guided restore wizard (choose full / category / single file)
+sudo pve-config-backup --restore <file> --what storage --yes      # scripted: restore a category
+sudo pve-config-backup --restore <file> --file etc/pve/storage.cfg  # scripted: one file
+sudo pve-config-backup --restore <file> --full --force-full       # automated full config.db restore
+sudo pve-config-backup --restore <file> --extract-only            # extract to review dir, change nothing
 sudo pve-config-backup --status           # Last backup, configured targets, schedule
 sudo pve-config-backup --set-cred <name>  # Seal a secret read from stdin (automation)
 sudo pve-config-backup --test-notify      # Test Gotify notification
@@ -406,9 +411,12 @@ NFS and FTP/FTPS targets (and any credentials) are managed via `--targets` and s
 
 **Requirements:**
 - Proxmox VE host, root access (sudo)
-- `tar`, `gzip` (present on Proxmox)
-- `nfs-common` for NFS targets (the script offers to install it), `curl` for FTP/FTPS and Gotify (present on Proxmox)
+- `tar`, `gzip` (present on Proxmox; the script offers to install if somehow missing)
+- Dependencies are checked **on demand based on what you configure** — `nfs-common` only if you add an NFS target, `curl` only for FTP/FTPS or Gotify, `openssh-client` only for SFTP/SCP. Each is checked the moment you add that export type (and re-checked at backup time), offered for install interactively, and fails loudly under cron rather than silently skipping the offsite copy. A purely local-only user is never prompted for tools they don't need.
 - `systemd-creds` for sealed credentials (present on Proxmox VE 8/9; falls back to a `chmod 600` file if absent)
+
+> [!TIP]
+> A config backup that only lives on the node it backs up dies with that node's disk. If you run with no export target, the script warns on every run that the backup is **local-only**. Add an offsite copy with `--targets` — SFTP (SSH keys) or NFS need no stored secret and are the recommended choice.
 
 **What it captures:**
 `/etc/pve` (guest configs, `storage.cfg`, firewall, HA, replication) and `config.db`, `/etc/network/interfaces` (+ `interfaces.d`), `/etc/hostname`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/passwd`, `/etc/group`, apt sources, `/etc/vzdump.conf`, `/etc/lvm/lvm.conf`, `/etc/cron.d`, `/etc/corosync` (clustered nodes), `/etc/shadow` + `/etc/ssh` (toggleable), and anything in `EXTRA_PATHS`.

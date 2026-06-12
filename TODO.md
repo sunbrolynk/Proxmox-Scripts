@@ -73,7 +73,7 @@
 - [x] Latency measurement with color-coded thresholds
 - [x] Mount options display (hard vs soft detection)
 
-### pve-config-backup.sh — v1.2.1
+### pve-config-backup.sh — v1.3.4 (hardware-validated)
 Backs up Proxmox VE **host** configuration — the gap PBS/vzdump leave open. A dead
 node otherwise means a full reinstall, because the host config (/etc/pve, networking,
 storage, cluster membership, users, apt sources) isn't covered by guest backups.
@@ -91,7 +91,7 @@ Targets a Proxmox host (root). Config only, no guest disk images — safe to run
 - [x] Local dest with prefix-scoped retention (never blind rm)
 - [x] Optional parallel scp to one or more remote nodes (key-based, BatchMode)
 - [x] `--list` mode (archives with date/size)
-- [x] `--restore <file>` guided extract-and-instruct mode (no blind clobber of /etc)
+- [x] `--restore <file>` — superseded by the full restore wizard in v1.3.0 (see below)
 - [x] `--status` (last backup, count, total size, targets, cron config)
 - [x] Man-style help with dynamic config line numbers
 - [x] Interactive menu with all options
@@ -116,6 +116,23 @@ Targets a Proxmox host (root). Config only, no guest disk images — safe to run
 - [x] Guided `--setup` (flag + menu item + auto-offer on first run): backup always,
       then optional export target / Gotify / schedule
 
+**On-demand dependency model (v1.2.5–v1.2.8):**
+- [x] `require_dep()` helper — offer-install interactive / fail-loud cron, one consistent path
+- [x] Dependencies gated on what's configured (nfs-common / curl / openssh-client), checked
+      both at target-add time and at preflight
+- [x] tar/gzip upgraded from hard-exit to offer-install
+- [x] Dep gate moved ahead of target detail prompts (fail-fast)
+- [x] Local-only offsite warning in preflight (warn loudly, still allow)
+
+**Restore wizard + scriptable restore (v1.3.0–v1.3.4):**
+- [x] Guided wizard: full / by-category (guests, storage, network, users, ssh, apt, cron) /
+      single-file browser / category drill-down — places files AND offers service reloads
+- [x] Full config.db restore: stop → swap → verify → **auto-rollback on unhealthy**, typed `RESTORE` gate
+- [x] Restore CLI: `--what`, `--file`, `--full`, `--extract-only`, `--yes`; `--force-full`
+      required for unattended full restore (—yes alone won't swap config.db)
+- [x] Identity files (hostname/hosts) auto-restored under forced/—yes, prompted interactively
+- [x] Fixed the `set -u` same-line-local wrong-filename bug (see SECURITY.md findings)
+
 **Self-install awareness (v1.2.1):**
 - [x] Canonical install path (SCRIPT_INSTALL_DEST = /usr/local/bin/<name>)
 - [x] installed_ok() check (exists + executable at canonical path)
@@ -133,9 +150,12 @@ Targets a Proxmox host (root). Config only, no guest disk images — safe to run
 - [x] SECURITY.md sealed-credentials note
 
 **Still open:**
-- [ ] Optional `sqlite3 .backup` path for a consistent config.db snapshot (decision pending)
-- [ ] Tested on at least one production Proxmox environment (nested-VM dry run first —
-      see TESTING-pve-config-backup.md)
+- [x] ~~Tested on at least one production Proxmox environment~~ — **done.** Full nested-VM
+      validation on PVE 9.2 with vTPM: every path (backup, multi-target export, sealing,
+      scheduling, the entire restore wizard + CLI, automated full restore with rollback,
+      and the install-nudge state machine) proven on real hardware. 10 findings + 2 feature releases logged.
+- [ ] Optional `sqlite3 .backup` path for a consistent config.db snapshot (decision pending —
+      `cp -a` of config.db proved correct in testing; this is a nice-to-have, not a gap)
 - [ ] Decide whether to propagate the sealed-credential helpers to the other three
       scripts' Gotify tokens (proving-ground first, then promote to script-template.sh)
 

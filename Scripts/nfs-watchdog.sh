@@ -24,9 +24,17 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
+
+# State (scheduling / sealed credentials / persisted settings)
+STATE_DIR="/etc/${SCRIPT_NAME}"
+SECRETS_DIR="${STATE_DIR}/secrets"
+SETTINGS_FILE="${STATE_DIR}/config.env"
+SECRET_PREFIX="${SCRIPT_NAME}"
+INSTALL_NUDGE_DISMISSED=""
 
 # Colors
 RD=$'\033[01;31m'
@@ -252,81 +260,148 @@ remount_nfs() {
     return 1
 }
 
-send_gotify() {
-    local title="$1"
-    local message="$2"
-    local priority="${3:-$GOTIFY_PRIORITY}"
-
-    if [[ -z "$GOTIFY_URL" ]] || [[ -z "$GOTIFY_TOKEN" ]]; then
-        return 0
+# ============================================================
+# SEALED CREDENTIALS + SETTINGS + DEPS (shared conventions)
+# ============================================================
+have_systemd_creds() { command -v systemd-creds &>/dev/null; }
+secret_set() {
+    local name="$1" value; value="$(cat)"
+    mkdir -p "$SECRETS_DIR"; chmod 700 "$SECRETS_DIR"
+    if have_systemd_creds; then
+        if printf '%s' "$value" | systemd-creds encrypt --name="${SECRET_PREFIX}-${name}" - "${SECRETS_DIR}/${name}.cred" 2>/dev/null; then
+            chmod 600 "${SECRETS_DIR}/${name}.cred"; rm -f "${SECRETS_DIR}/${name}.secret" 2>/dev/null || true
+            echo "systemd-creds"; return 0
+        fi
     fi
+    printf '%s' "$value" > "${SECRETS_DIR}/${name}.secret"; chmod 600 "${SECRETS_DIR}/${name}.secret"
+    rm -f "${SECRETS_DIR}/${name}.cred" 2>/dev/null || true; echo "file-600"; return 0
+}
+secret_get() {
+    local name="$1"
+    if [[ -f "${SECRETS_DIR}/${name}.cred" ]] && have_systemd_creds; then
+        systemd-creds decrypt --name="${SECRET_PREFIX}-${name}" "${SECRETS_DIR}/${name}.cred" - 2>/dev/null && return 0
+    fi
+    [[ -f "${SECRETS_DIR}/${name}.secret" ]] && { cat "${SECRETS_DIR}/${name}.secret"; return 0; }
+    return 1
+}
+secret_exists() { [[ -f "${SECRETS_DIR}/$1.cred" || -f "${SECRETS_DIR}/$1.secret" ]]; }
+resolve_gotify_token() { if secret_exists gotify-token; then secret_get gotify-token; else printf '%s' "$GOTIFY_TOKEN"; fi; }
 
-    # Send with markdown support
-    curl -s -X POST "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"title\": \"${title}\",
-            \"message\": $(echo "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "\"${message}\""),
-            \"priority\": ${priority},
-            \"extras\": {
-                \"client::display\": {
-                    \"contentType\": \"text/markdown\"
-                }
-            }
-        }" &>/dev/null || true
+load_settings() {
+    [[ -f "$SETTINGS_FILE" ]] || return 0
+    local line key val
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        key="${line%%=*}"; val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
+        case "$key" in
+            GOTIFY_URL) GOTIFY_URL="$val" ;;
+            GOTIFY_PRIORITY) GOTIFY_PRIORITY="$val" ;;
+            INSTALL_NUDGE_DISMISSED) INSTALL_NUDGE_DISMISSED="$val" ;;
+        esac
+    done < "$SETTINGS_FILE"
+}
+settings_set() {
+    local key="$1" val="$2" tmp
+    mkdir -p "$(dirname "$SETTINGS_FILE")"; chmod 700 "$(dirname "$SETTINGS_FILE")"
+    touch "$SETTINGS_FILE"; chmod 600 "$SETTINGS_FILE"
+    tmp=$(mktemp /tmp/.cfg-set-XXXXXX)
+    grep -v "^${key}=" "$SETTINGS_FILE" > "$tmp" 2>/dev/null || true
+    echo "${key}=\"${val}\"" >> "$tmp"; cat "$tmp" > "$SETTINGS_FILE"; chmod 600 "$SETTINGS_FILE"; rm -f "$tmp"
+}
+require_dep() {
+    local cmd="$1" pkg="$2" label="${3:-$2}"
+    command -v "$cmd" &>/dev/null && { msg_ok "${label} present"; return 0; }
+    if [[ "${INTERACTIVE:-true}" == true ]]; then
+        msg_warn "${label} not installed (package: ${pkg})"
+        read -rp "  Install ${pkg} now? [Y/n]: " a
+        if [[ ! "$a" =~ ^[Nn]$ ]]; then
+            apt-get update -qq >/dev/null 2>&1 && apt-get install -y "$pkg" >/dev/null 2>&1 \
+                && { msg_ok "${pkg} installed"; return 0; }
+            msg_error "Install failed — apt-get install -y ${pkg}"; return 1
+        fi
+        return 1
+    fi
+    msg_error "${label} missing — install it: apt-get install -y ${pkg}"; return 1
+}
+do_set_cred() {
+    local name="$1"
+    [[ -z "$name" ]] && { header_info; msg_error "--set-cred requires a name (e.g. gotify-token)"; exit 1; }
+    local method
+    if [[ -t 0 ]]; then read -rsp "Enter value for '${name}': " _v; echo "" >&2; method=$(printf '%s' "$_v" | secret_set "$name")
+    else method=$(secret_set "$name"); fi
+    echo "Sealed '${name}' via ${method}" >&2; exit 0
+}
+installed_ok() { [[ -f "$SCRIPT_INSTALL_DEST" && -x "$SCRIPT_INSTALL_DEST" ]]; }
+install_self() {
+    if [[ "$SCRIPT_PATH" == "$SCRIPT_INSTALL_DEST" ]]; then
+        chmod 755 "$SCRIPT_INSTALL_DEST" 2>/dev/null || true
+        msg_ok "Already at ${SCRIPT_INSTALL_DEST} (ensured executable)"; return 0
+    fi
+    if cp "$SCRIPT_PATH" "$SCRIPT_INSTALL_DEST" 2>/dev/null && chmod 755 "$SCRIPT_INSTALL_DEST"; then
+        msg_ok "Installed to ${SCRIPT_INSTALL_DEST} (chmod 755)"; return 0
+    fi
+    msg_warn "Could not install to ${SCRIPT_INSTALL_DEST}"; return 1
+}
+require_installed_for_schedule() {
+    installed_ok && return 0
+    echo ""
+    msg_warn "Scheduling needs the script at ${SCRIPT_INSTALL_DEST} — cron runs that exact path."
+    read -rp "  Install it there now? [Y/n]: " a
+    if [[ ! "$a" =~ ^[Nn]$ ]]; then
+        install_self && { settings_set INSTALL_NUDGE_DISMISSED ""; INSTALL_NUDGE_DISMISSED=""; return 0; }
+        return 1
+    fi
+    msg_warn "Cannot schedule without installing first."; return 1
+}
+gotify_configured() {
+    [[ -n "$GOTIFY_URL" ]] || return 1
+    secret_exists gotify-token && return 0
+    [[ -n "$GOTIFY_TOKEN" ]]
+}
+
+# Token in a chmod-600 curl config header — NEVER in the URL (avoids argv/ps leak).
+send_gotify() {
+    local title="$1" message="$2" priority="${3:-$GOTIFY_PRIORITY}"
+    gotify_configured || return 0
+    local token curl_conf json_message
+    token="$(resolve_gotify_token)"; [[ -z "$token" ]] && return 0
+    json_message=$(printf '%s' "$message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || printf '"%s"' "$message")
+    curl_conf=$(mktemp /tmp/.gotify-XXXXXX); chmod 600 "$curl_conf"
+    printf 'header = "X-Gotify-Key: %s"\nheader = "Content-Type: application/json"\n' "$token" > "$curl_conf"
+    curl -s -K "$curl_conf" -X POST "${GOTIFY_URL}/message" \
+        -d "{\"title\":\"${title}\",\"message\":${json_message},\"priority\":${priority},\"extras\":{\"client::display\":{\"contentType\":\"text/markdown\"}}}" &>/dev/null || true
+    rm -f "$curl_conf"
 }
 
 test_gotify() {
     header_info
     echo -e "${TAB}${BD}Gotify Notification Test${CL}"
     echo ""
-
-    if [[ -z "$GOTIFY_URL" ]]; then
-        msg_error "GOTIFY_URL not configured"
-        echo -e "${TAB}  Edit the script and set GOTIFY_URL and GOTIFY_TOKEN"
-        echo ""
-        exit 1
-    fi
-
-    if [[ -z "$GOTIFY_TOKEN" ]]; then
-        msg_error "GOTIFY_TOKEN not configured"
-        echo -e "${TAB}  Edit the script and set GOTIFY_TOKEN"
-        echo ""
-        exit 1
-    fi
+    [[ -z "$GOTIFY_URL" ]] && { msg_error "GOTIFY_URL not configured"; echo -e "${TAB}  Set GOTIFY_URL, then seal the token: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
+    require_dep curl curl "curl" || { echo ""; exit 1; }
+    local token; token="$(resolve_gotify_token)"
+    [[ -z "$token" ]] && { msg_error "No Gotify token — seal one: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
 
     msg_info "Sending test notification to ${GOTIFY_URL}"
-
     local test_message="### ✅ Connection Successful
 
 **Script:** \`${SCRIPT_NAME}\`
 **Node:** \`$(hostname)\`
 **Time:** $(date '+%Y-%m-%d %H:%M:%S')
 
----
-
 *NFS Watchdog is configured and ready to send alerts.*"
 
-    local response
-    response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-        "${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"title\": \"🐕 NFS Watchdog — Test\",
-            \"message\": $(echo "$test_message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null),
-            \"priority\": ${GOTIFY_PRIORITY},
-            \"extras\": {
-                \"client::display\": {
-                    \"contentType\": \"text/markdown\"
-                }
-            }
-        }" 2>/dev/null)
-
+    local curl_conf json_message response
+    curl_conf=$(mktemp /tmp/.gotify-XXXXXX); chmod 600 "$curl_conf"
+    printf 'header = "X-Gotify-Key: %s"\nheader = "Content-Type: application/json"\n' "$token" > "$curl_conf"
+    json_message=$(printf '%s' "$test_message" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+    response=$(curl -s -o /dev/null -w "%{http_code}" -K "$curl_conf" -X POST "${GOTIFY_URL}/message" \
+        -d "{\"title\":\"🐕 NFS Watchdog — Test\",\"message\":${json_message},\"priority\":${GOTIFY_PRIORITY},\"extras\":{\"client::display\":{\"contentType\":\"text/markdown\"}}}" 2>/dev/null)
+    rm -f "$curl_conf"
     if [[ "$response" == "200" ]]; then
         msg_ok "Test notification sent successfully"
     else
         msg_error "Notification failed (HTTP ${response})"
-        echo -e "${TAB}  Check GOTIFY_URL and GOTIFY_TOKEN"
     fi
     echo ""
     exit 0
@@ -653,7 +728,7 @@ manage_cron() {
     echo -e "${TAB}${BD}Schedule Manager${CL}"
     echo ""
 
-    local CRON_CMD="/usr/local/bin/${SCRIPT_NAME} -y >> ${LOG_FILE} 2>&1"
+    local CRON_CMD="${SCRIPT_INSTALL_DEST} -y >> ${LOG_FILE} 2>&1"
     local CURRENT_CRON
     CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
 
@@ -669,7 +744,7 @@ manage_cron() {
         case "$cron_choice" in
             1) ;; # fall through to schedule picker
             2)
-                crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" | crontab -
+                { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; } | crontab -
                 echo ""
                 msg_ok "Schedule removed"
                 echo ""
@@ -718,13 +793,21 @@ manage_cron() {
             ;;
     esac
 
-    # Remove existing entry and add new one
+    # Gate on being installed at the canonical path (cron runs that exact path).
+    require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
+
+    # Remove existing entry and add new one. `|| true` keeps an empty grep result
+    # from tripping pipefail/inherit_errexit and silently aborting the write.
     local NEW_CRON="${CRON_SCHEDULE} ${CRON_CMD}"
-    (crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}"; echo "$NEW_CRON") | crontab -
+    { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "$NEW_CRON"; } | crontab -
 
     echo ""
-    msg_ok "Schedule set: ${GN}${CRON_SCHEDULE}${CL}"
-    echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+    if crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"; then
+        msg_ok "Schedule set: ${GN}${CRON_SCHEDULE}${CL}"
+        echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+    else
+        msg_error "Schedule write failed — could not update crontab. Is cron installed and running?"
+    fi
     echo ""
     exit 0
 }
@@ -733,7 +816,8 @@ manage_cron() {
 # MAIN
 # ============================================================
 
-# Early exit for help, version, status, test-notify
+# Early exit for help, version, status (read-only)
+load_settings
 for arg in "${@:-}"; do
     case "${arg:-}" in
         --help|-h) show_help ;;
@@ -743,8 +827,6 @@ for arg in "${@:-}"; do
             exit 0
             ;;
         --status) show_status ;;
-        --test-notify) test_gotify ;;
-        --schedule) manage_cron ;;
     esac
 done
 
@@ -755,6 +837,18 @@ if [[ $EUID -ne 0 ]]; then
     msg_error "This script must be run as root (use sudo)"
     exit 1
 fi
+
+# Flags that need root, dispatched before the main run.
+ARGS=("${@:-}")
+i=0
+while [[ $i -lt ${#ARGS[@]} ]]; do
+    case "${ARGS[$i]:-}" in
+        --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
+        --test-notify) test_gotify ;;
+        --schedule) manage_cron ;;
+    esac
+    i=$((i+1))
+done
 
 # Parse flags
 AUTO_YES=false
@@ -769,6 +863,18 @@ for arg in "${@:-}"; do
         --remount) DO_REMOUNT_ALL=true; INTERACTIVE=false ;;
     esac
 done
+
+# One-time install nudge (interactive only) so cron can run the canonical path.
+if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSED" != "1" ]]; then
+    echo -e "${TAB}${YW}Heads up: this script isn't installed at ${SCRIPT_INSTALL_DEST}.${CL}"
+    echo -e "${TAB}Installing it there is what lets the cron / --schedule feature run unattended."
+    echo ""
+    read -rp "  Install it there now? [Y/n]: " _ans
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then install_self || true
+    else msg_warn "Skipped — scheduling stays disabled until installed. I won't ask again."
+         settings_set INSTALL_NUDGE_DISMISSED "1"; INSTALL_NUDGE_DISMISSED="1"; fi
+    echo ""
+fi
 
 # Interactive menu
 if [[ "$INTERACTIVE" == true ]]; then

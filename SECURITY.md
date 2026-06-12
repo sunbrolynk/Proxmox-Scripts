@@ -87,9 +87,22 @@ These are patterns that have been seen in malicious scripts submitted to open-so
 
 Document any suspicious patterns or notable security findings from PR reviews here for future reference.
 
-| Date | PR/Script | Finding | Resolution |
-|------|-----------|---------|------------|
-| — | — | No findings yet | — |
+The entries below come from a full nested-VM hardware-validation pass of `pve-config-backup.sh` (PVE 9.2, vTPM-backed). Every one was surfaced by *running* the script against real hardware and real export targets — none were caught by the script's own self-tests, which is the central lesson: self-tests verify the paths you thought to write; only execution against real state finds the rest.
+
+| Date | Script / Version | Finding | Resolution |
+|------|------------------|---------|------------|
+| 2026-06-11 | pve-config-backup 1.2.2 | A runtime-only flag (`SETUP`) leaked into the dynamically-generated `--help` config table | Added to the `grep -v` exclusion list for the help table |
+| 2026-06-11 | pve-config-backup 1.2.3 | **Silent schedule failure.** `crontab -l \| grep -v "$SCRIPT_NAME"` exits non-zero when it filters out every line (empty/fresh crontab); under `pipefail` + `inherit_errexit` this aborted the cron write with no error, and `--status` honestly reported "not scheduled" | `\|\| true` on all crontab-write pipelines; `cron_write` now verifies the entry landed; failures reported loudly |
+| 2026-06-11 | pve-config-backup 1.2.4 | Export targets were not de-duplicated on re-add (same target could be stored twice) | Added `target_identity()` helper (ignores credential field) + dedupe check before save |
+| 2026-06-11 | pve-config-backup 1.2.5 | `nfs-common` was not checked in preflight — an NFS export could silently fail under cron on a box without it | Added a gated preflight check that fails loud under cron |
+| 2026-06-11 | pve-config-backup 1.2.6 | `curl` (FTP/FTPS + Gotify, 5 call sites) and `openssh-client` (SFTP) were used with no dependency check; `tar`/`gzip` hard-exited instead of offering to install | Added a generic `require_dep()` helper; gated checks by what is actually configured |
+| 2026-06-11 | pve-config-backup 1.2.7 | `verify_sftp` / `verify_ftp` did not ensure their dependency at target-add time (only `verify_nfs` did) | Made all three transports ensure their dependency symmetrically |
+| 2026-06-11 | pve-config-backup 1.2.8 | Dependency gate ran *after* collecting target details (host/path) instead of before; no warning when a backup had no offsite target at all | Moved the dep gate ahead of detail prompts (fail-fast); added a loud local-only offsite warning in preflight |
+| 2026-06-11 | pve-config-backup 1.3.2 | A forced/unattended full restore (`--full --force-full`) still stopped to prompt for the per-identity files (`/etc/hostname`, `/etc/hosts`), so it could hang forever in automation | Identity files auto-restore under forced/`--yes` mode; interactive still prompts |
+| 2026-06-11 | pve-config-backup 1.3.3 | `--restore` with an empty shell variable produced a misleading "requires a path" error (the real cause was a flag landing where a path was expected) | Error now distinguishes none-given / got-a-flag (suggests checking the shell var) / archive-not-found (suggests `--list`) |
+| 2026-06-11 | pve-config-backup 1.3.4 | **`set -u` declaration-order footgun (correctness-critical).** The restore single-file drill-down used `local pick="${files[n]}" rel_p="${pick#...}"` — referencing `pick` on its own `local` declaration line. Under `set -u` this either threw `unbound variable` or used a stale same-named variable from a prior menu action, causing the success message to report the **wrong filename**. The placed file was correct (md5-verified) but a restore tool misreporting which file it touched is unacceptable | Split the declaration onto separate lines; audited the whole script and confirmed this was the only instance of the antipattern |
+
+> The 1.3.4 finding is the headline. It only reproduces when an earlier menu action (the single-file browser) leaves stale shell state that the later drill-down inherits — a sequence no single-path or unit test exercises. It was caught only because the wizard was driven through a realistic *sequence* of actions on real hardware.
 
 ## Best Practices for Contributors
 

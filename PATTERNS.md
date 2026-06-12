@@ -427,6 +427,85 @@ Guided setup (`--setup`, a menu item, and auto-offered when `is_first_run` detec
 
 ---
 
+## 18. On-demand, configuration-gated dependencies (`require_dep`)
+
+Don't demand every tool a script *could* use; demand the tool a given run *will* use. A single helper keeps the behavior identical everywhere — offer to install when interactive, fail loud (never silently skip) when not:
+
+```bash
+require_dep() {                       # require_dep <cmd> <apt-pkg> <label>
+    local cmd="$1" pkg="$2" label="${3:-$2}"
+    command -v "$cmd" &>/dev/null && { msg_ok "${label} present"; return 0; }
+    if [[ "${INTERACTIVE:-true}" == true ]]; then
+        read -rp "  Install ${pkg} now? [Y/n]: " a
+        [[ "$a" =~ ^[Nn]$ ]] && return 1
+        apt-get update -qq >/dev/null 2>&1 && apt-get install -y "$pkg" >/dev/null 2>&1 \
+            && { msg_ok "${pkg} installed"; return 0; }
+        msg_error "Install failed — apt-get install -y ${pkg}"; return 1
+    fi
+    msg_error "${label} missing — install it: apt-get install -y ${pkg}"; return 1   # cron: loud
+}
+```
+
+Gate the call on what's configured, and check at **both** the opt-in moment and at run time:
+
+```bash
+# at target-add time (verify_sftp): you just declared you need this
+require_dep scp openssh-client "openssh-client" || return 1
+# at preflight: safety net for a rebuilt node / target deployed elsewhere
+grep -q '^ftp|' "$TARGETS_FILE" || [[ -n "$GOTIFY_URL" ]] && require_dep curl curl "curl" || CRITICAL=true
+```
+
+A local-only user is never nagged about export tooling they'll never touch. Environment facts that *can't* be installed (is-this-a-PVE-host, is-`config.db`-present) stay detect-and-refuse, not `require_dep`.
+
+---
+
+## 19. The `set -u` same-line `local` self-reference footgun
+
+This is a correctness bug, not a style nit. Under `set -u`, **do not reference a variable on the same `local` line that first declares it:**
+
+```bash
+# WRONG — rel references pick on its own declaration line.
+# Throws 'unbound variable', or silently uses a stale same-named var from earlier.
+local pick="${files[$((n-1))]}" rel="${pick#$prefix/}"
+
+# RIGHT — declare, then assign on separate lines.
+local pick rel
+pick="${files[$((n-1))]}"
+rel="${pick#$prefix/}"
+```
+
+Bash evaluates a combined `local a=… b=…` left to right, but `a` is not reliably "set" for `${a…}` expansion within the same statement. The insidious part: if a variable of the same name exists from an earlier code path (a prior menu iteration in a long-lived interactive process), the broken line picks up the **stale** value instead of erroring — so the bug hides until a specific *sequence* of actions triggers it. Referencing **positional parameters** (`local src="$1/$2"`) on the declaration line is safe — they're always already set. Grep new scripts for `local [a-z_]+=.*\$\{?[a-z_]+` and eyeball every hit.
+
+---
+
+## 20. Guarded destructive operation with automatic rollback
+
+For an operation that can leave a system worse than it started (swapping a live database, replacing a bootloader), the pattern is: **save current → act → verify health → auto-rollback on failure**, behind a typed confirmation. Never a bare `y`.
+
+```bash
+[[ "${ASSUME_FORCED:-false}" == true ]] || { read -rp "  Type 'RESTORE' to proceed: " c; [[ "$c" == RESTORE ]] || return 1; }
+cp -a "$live_db" "$backup_db"            # 1. save the current state FIRST
+systemctl stop pve-cluster
+cp -a "$archived_db" "$live_db"          # 2. act
+systemctl start pve-cluster; sleep 3
+if systemctl is-active --quiet pve-cluster && ls /etc/pve/.version &>/dev/null; then
+    msg_ok "healthy"                     # 3a. verify BOTH service active AND mount populated
+else
+    systemctl stop pve-cluster           # 3b. unhealthy → roll back to the saved copy
+    cp -a "$backup_db" "$live_db"; systemctl start pve-cluster
+fi
+```
+
+Health verification must check the *real* success condition (the FUSE mount is populated), not just that the service reports active. Keep the pre-op backup on disk afterward — it's the user's manual escape hatch if even the rollback misbehaves. A forced/unattended mode may bypass the *typed prompt*, but never the *rollback net*.
+
+---
+
+## 21. Restore wizard: extract to a review dir, then act on request
+
+A restore feature should mirror the backup wizard's "ask, then do the hard parts for you" model — not dump instructions. Always extract to a throwaway review directory first (never straight over `/etc`), show contents, then offer: full restore / by-category / single-file drill-down. Each category handler places the file(s) **and** offers the matching service reload (`ifreload -a` for networking, `systemctl restart ssh` for SSH). Provide flag equivalents for every menu action (`--what`, `--file`, `--full`, `--extract-only`, `--yes`) so automation never has to drive a menu — exactly as every backup flag is also a menu item (pattern 7). The single most dangerous path gets the extra `--force-full` guard (pattern 20).
+
+---
+
 ## Checklist when adding a pattern to a new script
 
 - [ ] Colors + message functions (1, 2)
