@@ -26,7 +26,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pihole-sync"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -993,7 +993,12 @@ for arg in "${@:-}"; do
     esac
 done
 
+# Preflight
+preflight_checks
+
 # One-time install nudge (interactive only) so cron can run the canonical path.
+# Runs AFTER preflight — validate the environment before prompting to install
+# (matches the pve-config-backup reference flow).
 if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSED" != "1" ]]; then
     echo -e "${TAB}${YW}Heads up: this script isn't installed at ${SCRIPT_INSTALL_DEST}.${CL}"
     echo -e "${TAB}Installing it there is what lets the cron / --schedule feature run unattended."
@@ -1004,9 +1009,6 @@ if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSE
          settings_set INSTALL_NUDGE_DISMISSED "1"; INSTALL_NUDGE_DISMISSED="1"; fi
     echo ""
 fi
-
-# Preflight
-preflight_checks
 
 # First-run: auto-offer guided setup when nothing is configured yet.
 if [[ "$INTERACTIVE" == true ]] && is_first_run; then
