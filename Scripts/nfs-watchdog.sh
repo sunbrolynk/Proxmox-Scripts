@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -397,11 +397,16 @@ nfs_server_reachable() {
     source=$(awk -v mp="$mountpoint" '$2 == mp {print $1}' /proc/mounts 2>/dev/null | head -1)
     server="${source%%:*}"
     [[ -z "$server" ]] && return 1
-    if command -v rpcinfo &>/dev/null && timeout "${CHECK_TIMEOUT}" rpcinfo -T tcp "$server" nfs &>/dev/null; then
+    # A reachable server answers in well under a second; an unreachable one won't
+    # answer no matter how long we wait. Use a short fixed probe timeout (not the
+    # larger CHECK_TIMEOUT) and stop at the first success, so concluding "server
+    # down" is fast even though up to three probe methods are available.
+    local probe_to=2
+    if command -v rpcinfo &>/dev/null && timeout "$probe_to" rpcinfo -T tcp "$server" nfs &>/dev/null; then
         return 0
-    elif command -v showmount &>/dev/null && timeout "${CHECK_TIMEOUT}" showmount -e "$server" &>/dev/null; then
+    elif command -v showmount &>/dev/null && timeout "$probe_to" showmount -e "$server" &>/dev/null; then
         return 0
-    elif timeout "${CHECK_TIMEOUT}" bash -c "exec 3<>/dev/tcp/${server}/2049" 2>/dev/null; then
+    elif timeout "$probe_to" bash -c "exec 3<>/dev/tcp/${server}/2049" 2>/dev/null; then
         exec 3>&- 2>/dev/null || true
         return 0
     fi
@@ -1204,9 +1209,9 @@ if run_checks "$DRY_RUN"; then
 else
     CHECK_RESULT=$?
     if [[ "$DRY_RUN" == true ]]; then
-        msg_warn "Stale mounts detected (dry run — no action taken)"
+        msg_warn "Problems detected (dry run — no action taken) — see above"
     else
-        msg_error "Stale mount(s) detected — check output above"
+        msg_error "NFS problems detected — see the per-mount status above"
     fi
 fi
 echo ""
