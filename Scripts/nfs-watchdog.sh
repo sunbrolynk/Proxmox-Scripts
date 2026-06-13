@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.3"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -397,19 +397,12 @@ nfs_server_reachable() {
     source=$(awk -v mp="$mountpoint" '$2 == mp {print $1}' /proc/mounts 2>/dev/null | head -1)
     server="${source%%:*}"
     [[ -z "$server" ]] && return 1
-    # A reachable server answers in well under a second; an unreachable one won't
-    # answer no matter how long we wait. Use a short fixed probe timeout (not the
-    # larger CHECK_TIMEOUT) and stop at the first success, so concluding "server
-    # down" is fast even though up to three probe methods are available.
-    local probe_to=2
-    if command -v rpcinfo &>/dev/null && timeout "$probe_to" rpcinfo -T tcp "$server" nfs &>/dev/null; then
-        return 0
-    elif command -v showmount &>/dev/null && timeout "$probe_to" showmount -e "$server" &>/dev/null; then
-        return 0
-    elif timeout "$probe_to" bash -c "exec 3<>/dev/tcp/${server}/2049" 2>/dev/null; then
-        exec 3>&- 2>/dev/null || true
-        return 0
-    fi
+    # Single fast probe: a TCP connect to the NFS port (2049). A reachable server
+    # completes the handshake in milliseconds; a down/unreachable one fails or
+    # times out quickly. We deliberately use ONE probe with a short timeout rather
+    # than stacking rpcinfo+showmount+tcp — when the server is down, every probe
+    # burns its full timeout, so stacking three made "server down" slow to detect.
+    timeout 1 bash -c "exec 3<>/dev/tcp/${server}/2049" 2>/dev/null && { exec 3>&- 2>/dev/null || true; return 0; }
     return 1
 }
 
@@ -879,15 +872,15 @@ run_checks() {
         node_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
         stale_rows=""
         for m in "${STALE_MOUNTS[@]}"; do
-            stale_rows="${stale_rows}| \`${m}\` | 🔴 **STALE** |\n"
+            stale_rows="${stale_rows}- 🔴 **STALE:** \`${m}\`\n"
         done
         down_rows=""
         for m in "${SERVER_DOWN_MOUNTS[@]}"; do
-            down_rows="${down_rows}| \`${m}\` | ⛔ **SERVER UNAVAILABLE** |\n"
+            down_rows="${down_rows}- ⛔ **SERVER UNAVAILABLE:** \`${m}\`\n"
         done
         healthy_rows=""
         for m in "${HEALTHY_MOUNTS[@]}"; do
-            healthy_rows="${healthy_rows}| \`${m}\` | 🟢 Healthy |\n"
+            healthy_rows="${healthy_rows}- 🟢 Healthy: \`${m}\`\n"
         done
 
         # Title reflects the worst condition. A server outage is a distinct,
@@ -903,23 +896,22 @@ run_checks() {
 **Node:** \`$(hostname)\` (${node_ip})
 **Time:** $(date '+%Y-%m-%d %H:%M:%S')
 **Timeout:** ${CHECK_TIMEOUT}s
+**Auto-remount:** ${AUTO_REMOUNT}
 
-| Mount | Status |
-|-------|--------|
-${stale_rows}${down_rows}${healthy_rows}
-**Auto-remount:** ${AUTO_REMOUNT}"
+**Mounts:**
+${stale_rows}${down_rows}${healthy_rows}"
 
         if [[ ${#REMOUNTED_MOUNTS[@]} -gt 0 ]]; then
             alert_message="${alert_message}
-**Remounted:** ${#REMOUNTED_MOUNTS[@]} mount(s) recovered"
+✅ **Remounted:** ${#REMOUNTED_MOUNTS[@]} mount(s) recovered"
         fi
         if [[ ${#FAILED_REMOUNTS[@]} -gt 0 ]]; then
             alert_message="${alert_message}
-**⚠️ Failed remounts:** ${#FAILED_REMOUNTS[@]} — manual intervention needed"
+⚠️ **Failed remounts:** ${#FAILED_REMOUNTS[@]} — manual intervention needed"
         fi
         if [[ ${#SERVER_DOWN_MOUNTS[@]} -gt 0 ]]; then
             alert_message="${alert_message}
-**⛔ Server unreachable:** ${#SERVER_DOWN_MOUNTS[@]} mount(s) left untouched — check the NFS server/network"
+⛔ **Server unreachable:** ${#SERVER_DOWN_MOUNTS[@]} mount(s) left untouched — check the NFS server/network"
         fi
 
         send_gotify "🐕 NFS Watchdog — $(hostname)" "$alert_message" 8
