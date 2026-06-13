@@ -67,7 +67,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pve-config-backup"
-SCRIPT_VERSION="1.3.4"
+SCRIPT_VERSION="1.3.6"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"  # Canonical location (cron runs this path)
@@ -198,8 +198,11 @@ show_help() {
     echo -e "${TAB}${GN}--test-notify${CL}"
     echo -e "${TAB}${TAB}Send a test notification to Gotify."
     echo ""
-    echo -e "${TAB}${GN}--schedule${CL}"
-    echo -e "${TAB}${TAB}Set up, change, or remove the cron schedule."
+    echo -e "${TAB}${GN}--schedule [\"<cron expr>\"]${CL}"
+    echo -e "${TAB}${TAB}No argument: interactive menu to set/change/remove the schedule."
+    echo -e "${TAB}${TAB}With a cron expression: set it non-interactively, e.g."
+    echo -e "${TAB}${TAB}  ${BL}${SCRIPT_NAME} --schedule \"0 3 * * *\"${CL}"
+    echo -e "${TAB}${TAB}Use ${BL}--schedule remove${CL} to delete the schedule."
     echo ""
     echo -e "${TAB}${GN}-h, --help${CL}"
     echo -e "${TAB}${TAB}Display this help and exit."
@@ -218,15 +221,17 @@ show_help() {
     echo ""
     echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
     echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
-    while IFS= read -r line; do
-        local linenum var val
+    local _cfgvars="BACKUP_DEST RETENTION_DAYS REMOTE_TARGETS TARGETS_FILE INCLUDE_SHADOW INCLUDE_SSH_HOST_KEYS EXTRA_PATHS GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY LOG_FILE"
+    local cfgvar
+    for cfgvar in $_cfgvars; do
+        local line linenum val
+        line=$(grep -n "^${cfgvar}=" "$SCRIPT_PATH" | head -1)
+        [[ -z "$line" ]] && continue
         linenum=$(echo "$line" | cut -d: -f1)
-        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
         val=$(echo "$line" | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '"' | xargs)
-        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
-    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" \
-        | grep -v 'SCRIPT_\|BACKUP_PATHS\|SETTINGS_FILE\|SECRETS_DIR\|INSTALL_NUDGE_DISMISSED\|ARCHIVE_PATH\|ARCHIVE_SIZE\|SKIPPED_PATHS\|^[0-9]*:ARGS=\|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|INTERACTIVE\|AUTO_YES\|^[0-9]*:SETUP=' \
-        | head -12)
+        [[ -z "$val" ]] && val="(unset)"
+        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$cfgvar" "$linenum" "$val"
+    done
     echo ""
     echo -e "${BD}FILES${CL}"
     echo -e "${TAB}${BL}${SCRIPT_INSTALL_DEST}${CL}"
@@ -417,6 +422,7 @@ test_gotify() {
     echo ""
     [[ -z "$GOTIFY_URL" ]] && { msg_error "GOTIFY_URL not configured"; echo ""; exit 1; }
     gotify_configured || { msg_error "Gotify token not configured (set GOTIFY_TOKEN or seal one with --set-cred gotify-token)"; echo ""; exit 1; }
+    require_dep python3 python3 "python3 (for JSON encoding)" || { echo ""; exit 1; }
     msg_info "Sending test notification to ${GOTIFY_URL}"
     if do_gotify_test; then msg_ok "Test notification sent successfully"; else msg_error "Notification failed"; fi
     echo ""
@@ -427,10 +433,40 @@ test_gotify() {
 # CRON SCHEDULE MANAGER (daily-flavor — config backups are a day-level concern)
 # ============================================================
 manage_cron() {
+    local CRON_CMD="/usr/local/bin/${SCRIPT_NAME} --cron >> ${LOG_FILE} 2>&1"
+
+    # Non-interactive form: manage_cron "<cron expr>" (from --schedule "<expr>").
+    # One-shot scheduling for power users; "remove" deletes the schedule.
+    local DIRECT_EXPR="${1:-}"
+    if [[ -n "$DIRECT_EXPR" ]]; then
+        header_info
+        echo -e "${TAB}${BD}Schedule Manager${CL}"
+        echo ""
+        if [[ "$DIRECT_EXPR" == "remove" ]]; then
+            { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; } | crontab -
+            msg_ok "Schedule removed"; echo ""; exit 0
+        fi
+        local _fieldcount; _fieldcount=$(awk '{print NF}' <<<"$DIRECT_EXPR")
+        if [[ "$_fieldcount" -ne 5 ]]; then
+            msg_error "Invalid cron expression: expected 5 fields, got ${_fieldcount}"
+            echo -e "${TAB}  Example: ${BL}\"0 3 * * *\"${CL}  (daily at 3am)"
+            echo ""; exit 1
+        fi
+        require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
+        local NEW_CRON="${DIRECT_EXPR} ${CRON_CMD}"
+        { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "$NEW_CRON"; } | crontab -
+        if crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"; then
+            msg_ok "Schedule set: ${GN}${DIRECT_EXPR}${CL}"
+            echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+        else
+            msg_error "Schedule write failed — is cron installed and running?"
+        fi
+        echo ""; exit 0
+    fi
+
     header_info
     echo -e "${TAB}${BD}Schedule Manager${CL}"
     echo ""
-    local CRON_CMD="/usr/local/bin/${SCRIPT_NAME} --cron >> ${LOG_FILE} 2>&1"
     local CURRENT_CRON
     CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
 
@@ -1704,6 +1740,7 @@ guided_setup() {
             settings_set GOTIFY_URL "$g_url"
             GOTIFY_URL="$g_url"   # for the immediate test
             msg_ok "Token sealed via ${method}; URL saved to ${SETTINGS_FILE}"
+            require_dep python3 python3 "python3 (for JSON encoding)" || true
             msg_info "Sending a test notification"
             if do_gotify_test; then msg_ok "Test notification delivered"; else msg_error "Test failed — check URL/token; re-run later with --test-notify"; fi
         else
@@ -1792,7 +1829,7 @@ while [[ $i -lt ${#ARGS[@]} ]]; do
         --status) show_status ;;
         --list) list_backups ;;
         --test-notify) test_gotify ;;
-        --schedule) manage_cron ;;
+        --schedule) manage_cron "${ARGS[$((i+1))]:-}" ;;
         --set-cred)
             if [[ $EUID -ne 0 ]]; then header_info; msg_error "Sealing a credential must be run as root (use sudo)"; exit 1; fi
             cred_name="${ARGS[$((i+1))]:-}"

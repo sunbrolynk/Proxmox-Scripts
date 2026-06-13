@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.3.3"
+SCRIPT_VERSION="1.3.4"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -276,7 +276,7 @@ is_first_run() { [[ ! -f "$SETTINGS_FILE" ]]; }
 # operation (the whole point of a watchdog: cron + alerts), seals the
 # Gotify token, persists answers, optionally schedules. Re-runnable.
 # ------------------------------------------------------------
-run_setup() {
+guided_setup() {
     header_info
     echo -e "${TAB}${BD}Guided Setup${CL}"
     echo -e "${TAB}Answer each prompt. Press Enter to keep the [current] value."
@@ -320,6 +320,7 @@ run_setup() {
             local m; m=$(printf '%s' "$_tok" | secret_set gotify-token)
             msg_ok "Token sealed via ${m}"
             require_dep curl curl "curl" || true
+            require_dep python3 python3 "python3 (for JSON encoding)" || true
         fi
         read -rp "  Notification priority (1-10) [${GOTIFY_PRIORITY}]: " _v
         [[ -n "$_v" ]] && { GOTIFY_PRIORITY="$_v"; settings_set GOTIFY_PRIORITY "$_v"; }
@@ -553,6 +554,7 @@ test_gotify() {
     echo ""
     [[ -z "$GOTIFY_URL" ]] && { msg_error "GOTIFY_URL not configured"; echo -e "${TAB}  Set GOTIFY_URL, then seal the token: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
     require_dep curl curl "curl" || { echo ""; exit 1; }
+    require_dep python3 python3 "python3 (for JSON encoding)" || { echo ""; exit 1; }
     local token; token="$(resolve_gotify_token)"
     [[ -z "$token" ]] && { msg_error "No Gotify token — seal one: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
 
@@ -1101,7 +1103,7 @@ i=0
 while [[ $i -lt ${#ARGS[@]} ]]; do
     case "${ARGS[$i]:-}" in
         --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
-        --setup) header_info; preflight_checks; run_setup; exit 0 ;;
+        --setup) header_info; preflight_checks; guided_setup; exit 0 ;;
         --test-notify) test_gotify ;;
         --schedule) manage_cron "${ARGS[$((i+1))]:-}" ;;
     esac
@@ -1144,7 +1146,7 @@ fi
 if [[ "$INTERACTIVE" == true ]] && is_first_run; then
     echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
     read -rp "  Run the guided setup now? [Y/n]: " _ans
-    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then run_setup; fi
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then guided_setup; fi
     echo ""
 fi
 
@@ -1170,7 +1172,7 @@ if [[ "$INTERACTIVE" == true ]]; then
         4) DO_REMOUNT_ALL=true ;;
         5) test_gotify ;;
         6) manage_cron ;;
-        7) run_setup; exit 0 ;;
+        7) guided_setup; exit 0 ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."

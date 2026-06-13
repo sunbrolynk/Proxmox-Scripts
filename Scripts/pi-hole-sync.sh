@@ -39,7 +39,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pihole-sync"
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.3"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -147,8 +147,11 @@ show_help() {
     echo -e "${TAB}${GN}--test-notify${CL}"
     echo -e "${TAB}${TAB}Send a test notification to Gotify."
     echo ""
-    echo -e "${TAB}${GN}--schedule${CL}"
-    echo -e "${TAB}${TAB}Set up, change, or remove the cron schedule."
+    echo -e "${TAB}${GN}--schedule [\"<cron expr>\"]${CL}"
+    echo -e "${TAB}${TAB}No argument: interactive menu to set/change/remove the schedule."
+    echo -e "${TAB}${TAB}With a cron expression: set it non-interactively, e.g."
+    echo -e "${TAB}${TAB}  ${BL}${SCRIPT_NAME} --schedule \"0 3 * * *\"${CL}"
+    echo -e "${TAB}${TAB}Use ${BL}--schedule remove${CL} to delete the schedule."
     echo ""
     echo -e "${TAB}${GN}-h, --help${CL}"
     echo -e "${TAB}${TAB}Display this help and exit."
@@ -333,6 +336,7 @@ test_gotify() {
     echo ""
     [[ -z "$GOTIFY_URL" ]] && { msg_error "GOTIFY_URL not configured"; echo -e "${TAB}  Set GOTIFY_URL, then seal the token: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
     require_dep curl curl "curl" || { echo ""; exit 1; }
+    require_dep python3 python3 "python3 (for JSON encoding)" || { echo ""; exit 1; }
     local token; token="$(resolve_gotify_token)"
     [[ -z "$token" ]] && { msg_error "No Gotify token — seal one: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
 
@@ -856,7 +860,7 @@ is_first_run() { [[ ! -f "$SETTINGS_FILE" ]] && [[ -z "${BACKUP_PIHOLES// }" ]];
 
 # Guided setup wizard — walks every setting, seals the token, persists the rest.
 # Settings file becomes the source of truth (config-block vars are fallback defaults).
-run_setup() {
+guided_setup() {
     header_info
     echo -e "${TAB}${BD}Guided Setup${CL}"
     echo -e "${TAB}Answer each prompt. Press Enter to keep the ${BL}[current]${CL} value."
@@ -918,6 +922,7 @@ run_setup() {
             local m; m=$(printf '%s' "$_tok" | secret_set gotify-token)
             msg_ok "Token sealed via ${m}"
             require_dep curl curl "curl" || true
+            require_dep python3 python3 "python3 (for JSON encoding)" || true
         fi
         read -rp "  Notification priority (1-10) [${GOTIFY_PRIORITY}]: " _v
         [[ -n "$_v" ]] && { GOTIFY_PRIORITY="$_v"; settings_set GOTIFY_PRIORITY "$_v"; }
@@ -942,11 +947,41 @@ run_setup() {
 }
 
 manage_cron() {
+    local CRON_CMD="${SCRIPT_INSTALL_DEST} -y >> ${LOCAL_BACKUP_DIR}/${SCRIPT_NAME}.log 2>&1"
+
+    # Non-interactive form: manage_cron "<cron expr>" (from --schedule "<expr>").
+    # One-shot scheduling for power users; "remove" deletes the schedule.
+    local DIRECT_EXPR="${1:-}"
+    if [[ -n "$DIRECT_EXPR" ]]; then
+        header_info
+        echo -e "${TAB}${BD}Schedule Manager${CL}"
+        echo ""
+        if [[ "$DIRECT_EXPR" == "remove" ]]; then
+            { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; } | crontab -
+            msg_ok "Schedule removed"; echo ""; exit 0
+        fi
+        local _fieldcount; _fieldcount=$(awk '{print NF}' <<<"$DIRECT_EXPR")
+        if [[ "$_fieldcount" -ne 5 ]]; then
+            msg_error "Invalid cron expression: expected 5 fields, got ${_fieldcount}"
+            echo -e "${TAB}  Example: ${BL}\"0 3 * * *\"${CL}  (daily at 3am)"
+            echo ""; exit 1
+        fi
+        require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
+        local NEW_CRON="${DIRECT_EXPR} ${CRON_CMD}"
+        { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "$NEW_CRON"; } | crontab -
+        if crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"; then
+            msg_ok "Schedule set: ${GN}${DIRECT_EXPR}${CL}"
+            echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+        else
+            msg_error "Schedule write failed — is cron installed and running?"
+        fi
+        echo ""; exit 0
+    fi
+
     header_info
     echo -e "${TAB}${BD}Schedule Manager${CL}"
     echo ""
 
-    local CRON_CMD="${SCRIPT_INSTALL_DEST} -y >> ${LOCAL_BACKUP_DIR}/${SCRIPT_NAME}.log 2>&1"
     local CURRENT_CRON
     CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
 
@@ -1075,9 +1110,9 @@ i=0
 while [[ $i -lt ${#ARGS[@]} ]]; do
     case "${ARGS[$i]:-}" in
         --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
-        --setup) header_info; run_setup; exit 0 ;;
+        --setup) header_info; guided_setup; exit 0 ;;
         --test-notify) test_gotify ;;
-        --schedule) manage_cron ;;
+        --schedule) manage_cron "${ARGS[$((i+1))]:-}" ;;
         --list) list_backups ;;
         --diff) show_diff ;;
         --restore)
@@ -1124,7 +1159,7 @@ fi
 if [[ "$INTERACTIVE" == true ]] && is_first_run; then
     echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
     read -rp "  Run the guided setup now? [Y/n]: " _ans
-    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then run_setup; fi
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then guided_setup; fi
     echo ""
 fi
 
@@ -1160,7 +1195,7 @@ if [[ "$INTERACTIVE" == true ]]; then
         6) list_backups ;;
         7) test_gotify ;;
         8) manage_cron ;;
-        9) run_setup; exit 0 ;;
+        9) guided_setup; exit 0 ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
