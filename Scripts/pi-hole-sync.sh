@@ -39,7 +39,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pihole-sync"
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -773,12 +773,14 @@ show_diff() {
     echo -e "${TAB}${BL}Configuration Diff: Primary vs Backup(s)${CL}"
     echo ""
 
-    # Query primary counts
+    # Query primary counts. Pi-hole v6 does NOT ship the system `sqlite3` binary,
+    # but pihole-FTL has a built-in `sqlite3` subcommand that's always present —
+    # use that so --diff works everywhere with no extra dependency.
     local P_ADLISTS P_DOMAINS P_CLIENTS P_GROUPS
-    P_ADLISTS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM adlist" 2>/dev/null || echo "?")
-    P_DOMAINS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM domainlist" 2>/dev/null || echo "?")
-    P_CLIENTS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM client" 2>/dev/null || echo "?")
-    P_GROUPS=$(sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM 'group'" 2>/dev/null || echo "?")
+    P_ADLISTS=$(pihole-FTL sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM adlist" 2>/dev/null || echo "?")
+    P_DOMAINS=$(pihole-FTL sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM domainlist" 2>/dev/null || echo "?")
+    P_CLIENTS=$(pihole-FTL sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM client" 2>/dev/null || echo "?")
+    P_GROUPS=$(pihole-FTL sqlite3 /etc/pihole/gravity.db "SELECT COUNT(*) FROM 'group'" 2>/dev/null || echo "?")
 
     PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     echo -e "${TAB}${BD}Primary (${PRIMARY_IP}):${CL}"
@@ -789,16 +791,16 @@ show_diff() {
     echo ""
 
     for TARGET in ${BACKUP_PIHOLES}; do
-        # Query backup counts via SSH
+        # Query backup counts via SSH (pihole-FTL sqlite3 — bundled, no dep)
         local B_ADLISTS B_DOMAINS B_CLIENTS B_GROUPS
         B_ADLISTS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes -o ConnectTimeout=5 "${BACKUP_SSH_USER}@${TARGET}" \
-            "sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM adlist'" 2>/dev/null || echo "?")
+            "pihole-FTL sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM adlist'" 2>/dev/null || echo "?")
         B_DOMAINS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
-            "sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM domainlist'" 2>/dev/null || echo "?")
+            "pihole-FTL sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM domainlist'" 2>/dev/null || echo "?")
         B_CLIENTS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
-            "sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM client'" 2>/dev/null || echo "?")
+            "pihole-FTL sqlite3 /etc/pihole/gravity.db 'SELECT COUNT(*) FROM client'" 2>/dev/null || echo "?")
         B_GROUPS=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
-            "sqlite3 /etc/pihole/gravity.db \"SELECT COUNT(*) FROM 'group'\"" 2>/dev/null || echo "?")
+            "pihole-FTL sqlite3 /etc/pihole/gravity.db \"SELECT COUNT(*) FROM 'group'\"" 2>/dev/null || echo "?")
 
         echo -e "${TAB}${BD}Backup (${TARGET}):${CL}"
 
