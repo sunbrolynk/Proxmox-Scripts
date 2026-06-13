@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.3.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -391,34 +391,45 @@ test_mount_latency() {
     fi
 }
 
+nfs_server_reachable() {
+    local mountpoint="$1"
+    local source server
+    source=$(awk -v mp="$mountpoint" '$2 == mp {print $1}' /proc/mounts 2>/dev/null | head -1)
+    server="${source%%:*}"
+    [[ -z "$server" ]] && return 1
+    if command -v rpcinfo &>/dev/null && timeout "${CHECK_TIMEOUT}" rpcinfo -T tcp "$server" nfs &>/dev/null; then
+        return 0
+    elif command -v showmount &>/dev/null && timeout "${CHECK_TIMEOUT}" showmount -e "$server" &>/dev/null; then
+        return 0
+    elif timeout "${CHECK_TIMEOUT}" bash -c "exec 3<>/dev/tcp/${server}/2049" 2>/dev/null; then
+        exec 3>&- 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
 remount_nfs() {
     local mountpoint="$1"
+    # Callers MUST confirm nfs_server_reachable first. We never remount against a
+    # down server (that's a server-outage case, handled separately) — tearing the
+    # mount down then would leave it bare. This assumes the server is up.
     msg_info "Force remounting ${mountpoint}"
-
-    # Try lazy unmount first (doesn't block)
     if umount -l "$mountpoint" 2>/dev/null; then
         sleep 1
-        if mount "$mountpoint" 2>/dev/null; then
-            sleep 1
-            if test_mount_readable "$mountpoint"; then
-                msg_ok "Remounted ${mountpoint} successfully"
-                return 0
-            fi
-        fi
-    fi
-
-    # Try force unmount if lazy failed
-    umount -f "$mountpoint" 2>/dev/null
-    sleep 1
-    if mount "$mountpoint" 2>/dev/null; then
-        sleep 1
-        if test_mount_readable "$mountpoint"; then
-            msg_ok "Remounted ${mountpoint} successfully (force)"
+        if mount "$mountpoint" 2>/dev/null && { sleep 1; test_mount_readable "$mountpoint"; }; then
+            msg_ok "Remounted ${mountpoint} successfully"
             return 0
         fi
     fi
-
-    msg_error "Failed to remount ${mountpoint}"
+    umount -f "$mountpoint" 2>/dev/null
+    sleep 1
+    if mount "$mountpoint" 2>/dev/null && { sleep 1; test_mount_readable "$mountpoint"; }; then
+        msg_ok "Remounted ${mountpoint} successfully (force)"
+        return 0
+    fi
+    # Server was reachable but remount didn't come back — restore original mount.
+    mount "$mountpoint" 2>/dev/null || true
+    msg_error "Failed to remount ${mountpoint} (server reachable — check exports/permissions)"
     echo -e "${TAB}  Manual intervention may be needed"
     return 1
 }
@@ -672,6 +683,7 @@ run_checks() {
     local HEALTHY_MOUNTS=()
     local REMOUNTED_MOUNTS=()
     local FAILED_REMOUNTS=()
+    local SERVER_DOWN_MOUNTS=()
 
     echo -e "${TAB}${BL}NFS Health Check — $(hostname)${CL}"
     echo ""
@@ -701,22 +713,33 @@ run_checks() {
             (
                 local result="healthy"
                 local latency="0"
+                local bad=false
 
                 if ! test_mount_readable "$mountpoint"; then
-                    result="stale"
+                    bad=true
                 else
                     if ! test_mount_writable "$mountpoint"; then
-                        if mount_is_readonly_by_design "$mountpoint"; then
-                            result="healthy"
-                        else
-                            result="stale"
+                        if ! mount_is_readonly_by_design "$mountpoint"; then
+                            bad=true
                         fi
                     fi
-                    latency=$(test_mount_latency "$mountpoint")
-                    if [[ "$latency" == "timeout" ]]; then
+                    if [[ "$bad" != true ]]; then
+                        latency=$(test_mount_latency "$mountpoint")
+                        if [[ "$latency" == "timeout" ]]; then
+                            bad=true
+                        elif [[ "$latency" -gt 1000 ]]; then
+                            result="slow"
+                        fi
+                    fi
+                fi
+
+                # A bad mount is STALE (server up, remount fixes it) or SERVERDOWN
+                # (server unreachable — leave alone, warn). The classifier decides.
+                if [[ "$bad" == true ]]; then
+                    if nfs_server_reachable "$mountpoint"; then
                         result="stale"
-                    elif [[ "$latency" -gt 1000 ]]; then
-                        result="slow"
+                    else
+                        result="serverdown"
                     fi
                 fi
                 echo "${result}|${latency}" > "${CHECK_RESULTS}/$(echo "$mountpoint" | tr '/' '_')"
@@ -738,7 +761,7 @@ run_checks() {
 
                 case "$result" in
                     stale)
-                        msg_error "${mountpoint} — STALE (timed out after ${CHECK_TIMEOUT}s)"
+                        msg_error "${mountpoint} — STALE (server reachable; remount can fix)"
                         STALE_MOUNTS+=("$mountpoint")
                         if [[ "$DRY_RUN_MODE" == true ]] && [[ "$AUTO_REMOUNT" == true ]]; then
                             msg_warn "Would auto-remount ${mountpoint}"
@@ -749,6 +772,11 @@ run_checks() {
                                 FAILED_REMOUNTS+=("$mountpoint")
                             fi
                         fi
+                        ;;
+                    serverdown)
+                        msg_error "${mountpoint} — NFS SERVER UNAVAILABLE (server not responding)"
+                        echo -e "${TAB}  Leaving the mount untouched — server/network problem, not a stale mount."
+                        SERVER_DOWN_MOUNTS+=("$mountpoint")
                         ;;
                     slow)
                         msg_warn "${mountpoint} — healthy but slow (${latency}ms)"
@@ -768,48 +796,45 @@ run_checks() {
         while IFS=' ' read -r source mountpoint fstype; do
             msg_info "Checking ${mountpoint}"
 
+            # Determine if the mount is bad, and why.
+            local mount_bad=false bad_reason=""
             if ! test_mount_readable "$mountpoint"; then
-                msg_error "${mountpoint} — STALE (read timed out after ${CHECK_TIMEOUT}s)"
-                STALE_MOUNTS+=("$mountpoint")
-
-                if [[ "$DRY_RUN_MODE" == true ]]; then
-                    if [[ "$AUTO_REMOUNT" == true ]]; then
-                        msg_warn "Would auto-remount ${mountpoint}"
-                    fi
-                    continue
-                fi
-
-                if [[ "$AUTO_REMOUNT" == true ]]; then
-                    if remount_nfs "$mountpoint"; then
-                        REMOUNTED_MOUNTS+=("$mountpoint")
-                    else
-                        FAILED_REMOUNTS+=("$mountpoint")
-                    fi
-                fi
-                continue
-            fi
-
-            if ! test_mount_writable "$mountpoint"; then
+                mount_bad=true; bad_reason="read timed out after ${CHECK_TIMEOUT}s"
+            elif ! test_mount_writable "$mountpoint"; then
                 if mount_is_readonly_by_design "$mountpoint"; then
                     msg_ok "${mountpoint} — healthy (read-only by design)"
                     HEALTHY_MOUNTS+=("$mountpoint")
                     continue
                 fi
-                # rw mount that can't be written = degraded (server gone, export
-                # flipped ro, etc.) — treat like stale so it alerts / remounts.
-                msg_error "${mountpoint} — DEGRADED (rw mount not writable — server may be down)"
-                STALE_MOUNTS+=("$mountpoint")
+                mount_bad=true; bad_reason="rw mount not writable"
+            fi
 
-                if [[ "$DRY_RUN_MODE" == true ]]; then
-                    [[ "$AUTO_REMOUNT" == true ]] && msg_warn "Would auto-remount ${mountpoint}"
-                    continue
-                fi
-                if [[ "$AUTO_REMOUNT" == true ]]; then
-                    if remount_nfs "$mountpoint"; then
-                        REMOUNTED_MOUNTS+=("$mountpoint")
-                    else
-                        FAILED_REMOUNTS+=("$mountpoint")
+            if [[ "$mount_bad" == true ]]; then
+                # CLASSIFY: is the server reachable? That decides stale vs outage.
+                if nfs_server_reachable "$mountpoint"; then
+                    # Server is up but the mount is bad → STALE → a remount fixes it.
+                    msg_error "${mountpoint} — STALE (${bad_reason}; server is reachable)"
+                    STALE_MOUNTS+=("$mountpoint")
+                    if [[ "$DRY_RUN_MODE" == true ]]; then
+                        [[ "$AUTO_REMOUNT" == true ]] && msg_warn "Would auto-remount ${mountpoint}"
+                        continue
                     fi
+                    if [[ "$AUTO_REMOUNT" == true ]]; then
+                        if remount_nfs "$mountpoint"; then
+                            REMOUNTED_MOUNTS+=("$mountpoint")
+                        else
+                            FAILED_REMOUNTS+=("$mountpoint")
+                        fi
+                    else
+                        msg_warn "Auto-remount disabled — not remounting (run with AUTO_REMOUNT=true or remount manually)"
+                    fi
+                else
+                    # Server is unreachable → NOT a stale mount, a server outage.
+                    # Do NOT touch the mount (a remount can't help and would only
+                    # risk leaving it bare). Warn distinctly and move on.
+                    msg_error "${mountpoint} — NFS SERVER UNAVAILABLE (${bad_reason}; server not responding)"
+                    echo -e "${TAB}  Leaving the mount untouched. This is a server/network problem, not a stale mount."
+                    SERVER_DOWN_MOUNTS+=("$mountpoint")
                 fi
                 continue
             fi
@@ -832,6 +857,9 @@ run_checks() {
     echo ""
     echo -e "${TAB}  Healthy:    ${GN}${#HEALTHY_MOUNTS[@]}${CL}"
     echo -e "${TAB}  Stale:      ${RD}${#STALE_MOUNTS[@]}${CL}"
+    if [[ ${#SERVER_DOWN_MOUNTS[@]} -gt 0 ]]; then
+        echo -e "${TAB}  Server down: ${RD}${#SERVER_DOWN_MOUNTS[@]}${CL} (left untouched — not remounted)"
+    fi
     if [[ ${#REMOUNTED_MOUNTS[@]} -gt 0 ]]; then
         echo -e "${TAB}  Remounted:  ${GN}${#REMOUNTED_MOUNTS[@]}${CL}"
     fi
@@ -840,20 +868,32 @@ run_checks() {
     fi
     echo ""
 
-    # Send Gotify alert if stale mounts found (not in dry run)
-    if [[ ${#STALE_MOUNTS[@]} -gt 0 ]] && [[ "$DRY_RUN_MODE" != true ]]; then
-        local stale_rows healthy_rows node_ip
+    # Send a Gotify alert if there's anything wrong (stale OR server-down), not in dry run.
+    if { [[ ${#STALE_MOUNTS[@]} -gt 0 ]] || [[ ${#SERVER_DOWN_MOUNTS[@]} -gt 0 ]]; } && [[ "$DRY_RUN_MODE" != true ]]; then
+        local stale_rows down_rows healthy_rows node_ip title
         node_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
         stale_rows=""
         for m in "${STALE_MOUNTS[@]}"; do
             stale_rows="${stale_rows}| \`${m}\` | 🔴 **STALE** |\n"
+        done
+        down_rows=""
+        for m in "${SERVER_DOWN_MOUNTS[@]}"; do
+            down_rows="${down_rows}| \`${m}\` | ⛔ **SERVER UNAVAILABLE** |\n"
         done
         healthy_rows=""
         for m in "${HEALTHY_MOUNTS[@]}"; do
             healthy_rows="${healthy_rows}| \`${m}\` | 🟢 Healthy |\n"
         done
 
-        local alert_message="### 🔴 Stale NFS Mount Detected
+        # Title reflects the worst condition. A server outage is a distinct,
+        # louder problem than a stale mount (and the watchdog can't auto-fix it).
+        if [[ ${#SERVER_DOWN_MOUNTS[@]} -gt 0 ]]; then
+            title="⛔ NFS Server Unavailable"
+        else
+            title="🔴 Stale NFS Mount Detected"
+        fi
+
+        local alert_message="### ${title}
 
 **Node:** \`$(hostname)\` (${node_ip})
 **Time:** $(date '+%Y-%m-%d %H:%M:%S')
@@ -861,17 +901,20 @@ run_checks() {
 
 | Mount | Status |
 |-------|--------|
-${stale_rows}${healthy_rows}
+${stale_rows}${down_rows}${healthy_rows}
 **Auto-remount:** ${AUTO_REMOUNT}"
 
         if [[ ${#REMOUNTED_MOUNTS[@]} -gt 0 ]]; then
             alert_message="${alert_message}
 **Remounted:** ${#REMOUNTED_MOUNTS[@]} mount(s) recovered"
         fi
-
         if [[ ${#FAILED_REMOUNTS[@]} -gt 0 ]]; then
             alert_message="${alert_message}
 **⚠️ Failed remounts:** ${#FAILED_REMOUNTS[@]} — manual intervention needed"
+        fi
+        if [[ ${#SERVER_DOWN_MOUNTS[@]} -gt 0 ]]; then
+            alert_message="${alert_message}
+**⛔ Server unreachable:** ${#SERVER_DOWN_MOUNTS[@]} mount(s) left untouched — check the NFS server/network"
         fi
 
         send_gotify "🐕 NFS Watchdog — $(hostname)" "$alert_message" 8
@@ -881,8 +924,8 @@ ${stale_rows}${healthy_rows}
         fi
     fi
 
-    # Return non-zero if any mounts are stale
-    if [[ ${#STALE_MOUNTS[@]} -gt 0 ]]; then
+    # Return non-zero if anything is wrong — stale mounts OR an unreachable server.
+    if [[ ${#STALE_MOUNTS[@]} -gt 0 ]] || [[ ${#SERVER_DOWN_MOUNTS[@]} -gt 0 ]]; then
         return 1
     fi
     return 0
