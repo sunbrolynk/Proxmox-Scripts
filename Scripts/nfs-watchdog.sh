@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -126,8 +126,11 @@ show_help() {
     echo -e "${TAB}${GN}--test-notify${CL}"
     echo -e "${TAB}${TAB}Send a test notification to Gotify."
     echo ""
-    echo -e "${TAB}${GN}--schedule${CL}"
-    echo -e "${TAB}${TAB}Set up, change, or remove the cron schedule."
+    echo -e "${TAB}${GN}--schedule [\"<cron expr>\"]${CL}"
+    echo -e "${TAB}${TAB}With no argument: interactive menu to set/change/remove the schedule."
+    echo -e "${TAB}${TAB}With a cron expression: set it non-interactively, e.g."
+    echo -e "${TAB}${TAB}  ${BL}nfs-watchdog --schedule \"*/5 * * * *\"${CL}"
+    echo -e "${TAB}${TAB}Use ${BL}--schedule remove${CL} to delete the schedule."
     echo ""
     echo -e "${TAB}${GN}-h, --help${CL}"
     echo -e "${TAB}${TAB}Display this help and exit."
@@ -873,11 +876,44 @@ force_remount_all() {
 }
 
 manage_cron() {
+    local CRON_CMD="${SCRIPT_INSTALL_DEST} -y >> ${LOG_FILE} 2>&1"
+
+    # Non-interactive form: manage_cron "<cron expr>" (from --schedule "<expr>").
+    # Lets power users set the schedule in one shot, e.g.:
+    #   nfs-watchdog --schedule "*/5 * * * *"
+    # Use the literal word "remove" to delete the schedule non-interactively.
+    local DIRECT_EXPR="${1:-}"
+    if [[ -n "$DIRECT_EXPR" ]]; then
+        header_info
+        echo -e "${TAB}${BD}Schedule Manager${CL}"
+        echo ""
+        if [[ "$DIRECT_EXPR" == "remove" ]]; then
+            { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; } | crontab -
+            msg_ok "Schedule removed"; echo ""; exit 0
+        fi
+        # Validate: a cron expression must have exactly 5 fields.
+        local _fieldcount; _fieldcount=$(awk '{print NF}' <<<"$DIRECT_EXPR")
+        if [[ "$_fieldcount" -ne 5 ]]; then
+            msg_error "Invalid cron expression: expected 5 fields, got ${_fieldcount}"
+            echo -e "${TAB}  Example: ${BL}\"*/5 * * * *\"${CL}  (every 5 minutes)"
+            echo ""; exit 1
+        fi
+        require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
+        local NEW_CRON="${DIRECT_EXPR} ${CRON_CMD}"
+        { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "$NEW_CRON"; } | crontab -
+        if crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"; then
+            msg_ok "Schedule set: ${GN}${DIRECT_EXPR}${CL}"
+            echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+        else
+            msg_error "Schedule write failed — is cron installed and running?"
+        fi
+        echo ""; exit 0
+    fi
+
     header_info
     echo -e "${TAB}${BD}Schedule Manager${CL}"
     echo ""
 
-    local CRON_CMD="${SCRIPT_INSTALL_DEST} -y >> ${LOG_FILE} 2>&1"
     local CURRENT_CRON
     CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
 
@@ -995,7 +1031,7 @@ while [[ $i -lt ${#ARGS[@]} ]]; do
         --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
         --setup) header_info; preflight_checks; run_setup; exit 0 ;;
         --test-notify) test_gotify ;;
-        --schedule) manage_cron ;;
+        --schedule) manage_cron "${ARGS[$((i+1))]:-}" ;;
     esac
     i=$((i+1))
 done
