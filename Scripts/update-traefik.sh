@@ -43,7 +43,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.3.4"
+SCRIPT_VERSION="1.3.5"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -1232,7 +1232,7 @@ update_traefik() {
     # (Traefik release tarballs carry a non-root build UID); then force root:root
     # so a system binary a root service runs is never owned by an arbitrary user.
     msg_info "Installing new binary"
-    tar xzf "$tmp_file" -C "$(dirname "${TRAEFIK_BIN}")/" --no-same-owner traefik
+    tar --no-same-owner -xzf "$tmp_file" -C "$(dirname "${TRAEFIK_BIN}")/" traefik
     chown root:root "${TRAEFIK_BIN}"
     chmod +x "${TRAEFIK_BIN}"
     rm -f "$tmp_file"
@@ -1451,7 +1451,15 @@ for arg in "${@:-}"; do
         --changelog) SHOW_CHANGELOG=true ;;
         --cron) CRON_MODE=true; INTERACTIVE=false ;;
         --insecure-skip-checksum) SKIP_CHECKSUM=true ;;
-        v*) SPECIFIC_VERSION="$arg"; INTERACTIVE=false ;;
+        v*) SPECIFIC_VERSION="$arg" ; INTERACTIVE=false ;;
+        # Flags consumed by the earlier early-exit / root-dispatch loops — valid,
+        # already handled (those loops exit), so accept silently here.
+        --help|-h|--version|-V|--setup|--test-notify|--schedule|--set-cred|gotify-token) ;;
+        ""|-) ;;  # empty arg (no-args invocation) or lone dash — ignore
+        # Anything else is an unknown flag. Fail loudly with a non-zero exit
+        # rather than silently dropping into interactive mode — a typo'd flag in
+        # a cron job must NOT hang forever waiting on a prompt no one will answer.
+        -*) header_info; msg_error "Unknown option: ${arg}"; echo -e "${TAB}  See ${BL}${SCRIPT_NAME} --help${CL} for valid options."; echo ""; exit 1 ;;
     esac
 done
 
