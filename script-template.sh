@@ -14,16 +14,31 @@
 # Delete the subsystems a given script doesn't use.
 
 # ============================================================
-# CONFIGURATION — adjust these for your setup
+# CONFIGURATION
 # ============================================================
-EXAMPLE_TARGET="192.168.1.2"          # <description> (generic placeholder, never real values)
-EXAMPLE_USER="root"                   # <description>
-EXAMPLE_TIMEOUT=5                     # <description>
-# --- Gotify (optional — leave URL blank to disable notifications entirely) ---
-GOTIFY_URL=""                         # Gotify server URL (e.g. http://10.0.0.5:80)
-GOTIFY_TOKEN=""                       # Plaintext token (NOT recommended — prefer: --set-cred gotify-token)
-GOTIFY_PRIORITY=5                     # Notification priority (1-10)
+# You can configure this script two ways:
+#   • Run the guided setup:  <script-name> --setup   (recommended; seals secrets for you)
+#   • Or edit the values below directly (power users)
+# Either way works — the script detects whichever you've used.
+# ------------------------------------------------------------
+
+# --- Required: <identity> (if your script needs one) ---------
+# If there's a value the script can't sensibly default (a target host, a path),
+# ship it EMPTY here (not a fake placeholder) and treat "configured" as
+# settings-file-exists OR this var non-empty. If your script auto-detects its
+# target (like nfs-watchdog), delete this group entirely.
+EXAMPLE_TARGET=""                    # <description> — ship empty, no fake placeholder
+
+# --- Tunable: sane defaults, change only if your setup differs
+EXAMPLE_USER="root"                  # <description>
+EXAMPLE_TIMEOUT=5                    # <description>
 LOG_FILE="/var/log/<script-name>.log"  # Log file for cron mode
+
+# --- Optional: Gotify notifications (cron mode) --------------
+# Leave the token empty here and seal it instead:  <script-name> --set-cred gotify-token
+GOTIFY_URL=""                        # Gotify server URL (e.g. http://10.0.0.5:80)
+GOTIFY_TOKEN=""                      # Gotify token (prefer --set-cred over plaintext here)
+GOTIFY_PRIORITY=5                    # Notification priority (1-10)
 # ============================================================
 
 set -euo pipefail
@@ -31,7 +46,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="<script-name>"
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -190,6 +205,7 @@ test_gotify() {
     echo ""
     [[ -z "$GOTIFY_URL" ]] && { msg_error "GOTIFY_URL not configured"; echo ""; exit 1; }
     require_dep curl curl "curl" || { echo ""; exit 1; }
+    require_dep python3 python3 "python3 (for JSON encoding)" || { echo ""; exit 1; }
     local token; token="$(resolve_gotify_token)"
     [[ -z "$token" ]] && { msg_error "No Gotify token (set one with: ${SCRIPT_NAME} --set-cred gotify-token)"; echo ""; exit 1; }
 
@@ -280,6 +296,32 @@ require_installed_for_schedule() {
 }
 
 manage_cron() {
+    # Non-interactive form: manage_cron "<cron expr>" (from --schedule "<expr>").
+    # One-shot scheduling for power users; "remove" deletes the schedule.
+    local DIRECT_EXPR="${1:-}"
+    if [[ -n "$DIRECT_EXPR" ]]; then
+        header_info
+        echo -e "${TAB}${BD}Schedule Manager${CL}"
+        echo ""
+        if [[ "$DIRECT_EXPR" == "remove" ]]; then
+            cron_remove; msg_ok "Schedule removed"; echo ""; exit 0
+        fi
+        local _fc; _fc=$(awk '{print NF}' <<<"$DIRECT_EXPR")
+        if [[ "$_fc" -ne 5 ]]; then
+            msg_error "Invalid cron expression: expected 5 fields, got ${_fc}"
+            echo -e "${TAB}  Example: ${BL}\"0 3 * * *\"${CL}"
+            echo ""; exit 1
+        fi
+        require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
+        if cron_write "$DIRECT_EXPR"; then
+            msg_ok "Schedule set: ${GN}${DIRECT_EXPR}${CL}"
+            echo -e "${TAB}  ${BL}${DIRECT_EXPR} ${SCRIPT_INSTALL_DEST} -y >> ${LOG_FILE} 2>&1${CL}"
+        else
+            msg_error "Schedule write failed — is cron installed and running?"
+        fi
+        echo ""; exit 0
+    fi
+
     header_info
     echo -e "${TAB}${BD}Schedule Manager${CL}"
     echo ""
@@ -369,7 +411,9 @@ show_help() {
     echo -e "${BD}OPTIONS${CL}"
     echo -e "${TAB}${GN}(no arguments)${CL}  Launch interactive mode with guided menu."
     echo -e "${TAB}${GN}-y, --yes${CL}        Run without prompts (for cron)."
-    echo -e "${TAB}${GN}--schedule${CL}       Set up, change, or remove the cron schedule."
+    echo -e "${TAB}${GN}--setup${CL}          Guided setup wizard (auto-offered on first run; re-runnable)."
+    echo -e "${TAB}${GN}--schedule ${BL}[\"<cron>\"]${CL}  Interactive scheduler, or set non-interactively:"
+    echo -e "${TAB}                 ${BL}${SCRIPT_NAME} --schedule \"0 3 * * *\"${CL} (or ${BL}--schedule remove${CL})."
     echo -e "${TAB}${GN}--test-notify${CL}    Send a test notification to Gotify."
     echo -e "${TAB}${GN}--set-cred ${BL}<name>${CL}  Seal a secret (e.g. gotify-token) via systemd-creds."
     echo -e "${TAB}${GN}-h, --help${CL}       Display this help and exit."
@@ -380,15 +424,20 @@ show_help() {
     echo ""
     echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
     echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
-    # IMPORTANT: add every runtime/UPPERCASE non-config var of YOUR script to the
-    # grep -v exclusion list below, or it will leak into this table (see finding #1).
-    while IFS= read -r line; do
-        local linenum var val
+    # Allowlist of YOUR real config vars (not a blocklist of everything else).
+    # This is the converged standard: an allowlist can't leak runtime/state vars
+    # no matter where they sit, and the comment-strip keeps values clean.
+    local _cfgvars="EXAMPLE_TARGET EXAMPLE_USER EXAMPLE_TIMEOUT LOG_FILE GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY"
+    local cfgvar
+    for cfgvar in $_cfgvars; do
+        local line linenum val
+        line=$(grep -n "^${cfgvar}=" "$SCRIPT_PATH" | head -1)
+        [[ -z "$line" ]] && continue
         linenum=$(echo "$line" | cut -d: -f1)
-        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
-        val=$(echo "$line" | cut -d= -f2- | tr -d '"')
-        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
-    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|SECRET_\|STATE_\|SECRETS_\|SETTINGS_\|CRON_PRESETS\|INSTALL_NUDGE\|^[0-9]*:set \|^[0-9]*:shopt \|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|INTERACTIVE\|AUTO_YES\|DRY_RUN' | head -10)
+        val=$(echo "$line" | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '"' | xargs)
+        [[ -z "$val" ]] && val="(unset)"
+        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$cfgvar" "$linenum" "$val"
+    done
     echo ""
     echo -e "${BD}FILES${CL}"
     echo -e "${TAB}${BL}${SCRIPT_INSTALL_DEST}${CL}   Canonical install location (what cron runs)."
@@ -431,6 +480,73 @@ preflight_checks() {
     echo ""
 }
 
+# First run = no settings file yet. If your script has a REQUIRED identity var,
+# also treat a non-empty config-block value as "configured" (so power users who
+# fill the block aren't nagged):  [[ ! -f "$SETTINGS_FILE" && -z "${EXAMPLE_TARGET// }" ]]
+is_first_run() { [[ ! -f "$SETTINGS_FILE" ]]; }
+
+# ============================================================
+# GUIDED SETUP WIZARD
+# ============================================================
+# House standard: any script with settings, secrets, or scheduling has a wizard
+# that walks every knob needed for unattended operation, seals secrets, persists
+# answers, and optionally schedules. It's auto-offered on first run, available via
+# --setup, and as a menu item. The config block is the power-user fallback; the
+# settings file is the source of truth (load_settings overrides the block).
+guided_setup() {
+    header_info
+    echo -e "${TAB}${BD}Guided Setup${CL}"
+    echo -e "${TAB}Answer each prompt. Press Enter to keep the [current] value."
+    echo ""
+
+    # --- 1) Required identity (delete this group if the script auto-detects) ---
+    echo -e "${TAB}${BD}1) <Identity>${CL}"
+    read -rp "  <Target> [${EXAMPLE_TARGET}]: " _v
+    [[ -n "$_v" ]] && { EXAMPLE_TARGET="$_v"; settings_set EXAMPLE_TARGET "$_v"; }
+    echo ""
+
+    # --- 2) Tunables ---
+    echo -e "${TAB}${BD}2) Behavior${CL}"
+    read -rp "  <Timeout> seconds [${EXAMPLE_TIMEOUT}]: " _v
+    [[ -n "$_v" ]] && { EXAMPLE_TIMEOUT="$_v"; settings_set EXAMPLE_TIMEOUT "$_v"; }
+    echo ""
+
+    # --- 3) Gotify notifications (optional, token sealed) ---
+    echo -e "${TAB}${BD}3) Gotify notifications (optional)${CL}"
+    echo -e "${TAB}  ${INFO} An IP or hostname is fine (http is assumed). Only prefix ${BL}https://${CL} if your Gotify uses TLS."
+    read -rp "  Gotify server URL (blank to skip) [${GOTIFY_URL}]: " _v
+    if [[ -n "$_v" ]]; then
+        GOTIFY_URL="$_v"; settings_set GOTIFY_URL "$_v"
+        echo -e "${TAB}  ${INFO} The token is sealed (encrypted), never written in plaintext."
+        read -rsp "  Gotify application token: " _tok; echo ""
+        if [[ -n "$_tok" ]]; then
+            local m; m=$(printf '%s' "$_tok" | secret_set gotify-token)
+            msg_ok "Token sealed via ${m}"
+            require_dep curl curl "curl" || true
+            require_dep python3 python3 "python3 (for JSON encoding)" || true
+        fi
+        read -rp "  Notification priority (1-10) [${GOTIFY_PRIORITY}]: " _v
+        [[ -n "$_v" ]] && { GOTIFY_PRIORITY="$_v"; settings_set GOTIFY_PRIORITY "$_v"; }
+    else
+        msg_info "Skipping notifications"
+    fi
+    echo ""
+
+    # --- 4) Schedule (optional, gated on install) ---
+    echo -e "${TAB}${BD}4) Schedule${CL}"
+    if installed_ok; then
+        read -rp "  Set up a cron schedule now? [Y/n]: " _v
+        [[ ! "$_v" =~ ^[Nn]$ ]] && manage_cron
+    else
+        msg_warn "Not installed to ${SCRIPT_INSTALL_DEST} yet — scheduling needs that first."
+    fi
+    echo ""
+
+    msg_ok "Setup complete."
+    echo -e "${TAB}Settings saved to ${BL}${SETTINGS_FILE}${CL}"
+    echo ""
+}
+
 # ============================================================
 # CORE LOGIC — replace with the script's actual work
 # ============================================================
@@ -463,8 +579,9 @@ fi
 i=0
 while [[ $i -lt ${#ARGS[@]} ]]; do
     case "${ARGS[$i]:-}" in
+        --setup) header_info; preflight_checks; guided_setup; exit 0 ;;
         --test-notify) test_gotify ;;
-        --schedule) manage_cron ;;
+        --schedule) manage_cron "${ARGS[$((i+1))]:-}" ;;
         --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
     esac
     i=$((i+1))
@@ -481,7 +598,11 @@ for arg in "${ARGS[@]}"; do
     esac
 done
 
+# Preflight — validate the environment FIRST, before prompting for anything.
+preflight_checks
+
 # One-time install nudge (interactive only) — offer the canonical path so cron works.
+# Runs AFTER preflight (matches the reference flow; never nudge before validating).
 if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSED" != "1" ]]; then
     echo -e "${TAB}${YW}Heads up: this script isn't installed at ${SCRIPT_INSTALL_DEST}.${CL}"
     echo -e "${TAB}Installing it there is what lets the cron / --schedule feature run unattended."
@@ -493,7 +614,13 @@ if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSE
     echo ""
 fi
 
-preflight_checks
+# First-run: auto-offer the guided setup when nothing is configured yet.
+if [[ "$INTERACTIVE" == true ]] && is_first_run; then
+    echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
+    read -rp "  Run the guided setup now? [Y/n]: " _ans
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then guided_setup; fi
+    echo ""
+fi
 
 # Interactive menu (every flag is also a menu item)
 if [[ "$INTERACTIVE" == true ]]; then
@@ -502,13 +629,15 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}1)${CL} Run the main action"
     echo -e "${TAB}  ${GN}2)${CL} Manage cron schedule"
     echo -e "${TAB}  ${GN}3)${CL} Test Gotify notification"
+    echo -e "${TAB}  ${GN}4)${CL} Guided setup (reconfigure everything)"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-3/q]: " choice
+    read -rp "  Select an option [1-4/q]: " choice
     case "$choice" in
         1) ;;
         2) manage_cron ;;
         3) test_gotify ;;
+        4) guided_setup; exit 0 ;;
         q|Q) echo ""; msg_ok "Exiting. No changes made."; echo ""; exit 0 ;;
         *) msg_error "Invalid option"; exit 1 ;;
     esac
