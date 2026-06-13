@@ -43,7 +43,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -1377,17 +1377,15 @@ CURRENT_TRAEFIK=$(get_current_traefik_version)
 CURRENT_MANAGER=$(get_current_manager_version)
 VM_IP=$(get_vm_ip)
 
-# Pre-fetch Manager remote info for status display
+# Pre-fetch Manager remote info for status display.
+# READ-ONLY: never checkout/switch the working tree here. We compare the locally
+# checked-out HEAD against origin/main (fetch only updates the remote-tracking
+# ref, not the working tree), so viewing status can't move a user off a pinned
+# version. Switching branches is left to update_manager, and only with consent.
 MANAGER_UP_TO_DATE=true
 MANAGER_REMOTE_VERSION=""
 if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
     cd "${TRAEFIK_MANAGER_DIR}"
-    # Ensure on main branch for accurate comparison
-    local_branch=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git branch --show-current 2>/dev/null)
-    if [[ "$local_branch" != "main" ]]; then
-        runuser -u "${TRAEFIK_MANAGER_USER}" -- git checkout main --quiet 2>/dev/null
-        CURRENT_MANAGER=$(get_current_manager_version)
-    fi
     runuser -u "${TRAEFIK_MANAGER_USER}" -- git fetch origin main --tags --quiet 2>/dev/null
     local_hash=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse HEAD 2>/dev/null)
     remote_hash=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse origin/main 2>/dev/null)
