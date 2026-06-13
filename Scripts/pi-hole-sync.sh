@@ -39,7 +39,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pihole-sync"
-SCRIPT_VERSION="1.2.4"
+SCRIPT_VERSION="1.2.6"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -820,21 +820,33 @@ run_setup() {
 
     # --- SSH key check ---
     echo -e "${TAB}${BD}3) SSH connectivity${CL}"
-    local first_target; first_target="${BACKUP_PIHOLES%% *}"
-    if [[ -n "$first_target" ]]; then
-        msg_info "Testing SSH to ${first_target}"
-        if ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${first_target}" "echo ok" &>/dev/null; then
-            msg_ok "SSH to ${first_target} works (key-based)"
+    if [[ -n "${BACKUP_PIHOLES// }" ]]; then
+        local _ssh_target _ssh_ok=0 _ssh_bad=0 _ssh_total=0
+        for _ssh_target in ${BACKUP_PIHOLES}; do
+            _ssh_total=$((_ssh_total + 1))
+            msg_info "Testing SSH to ${_ssh_target}"
+            if ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${_ssh_target}" "echo ok" &>/dev/null; then
+                msg_ok "SSH to ${_ssh_target} works (key-based)"
+                _ssh_ok=$((_ssh_ok + 1))
+            else
+                msg_warn "Could not SSH to ${BACKUP_SSH_USER}@${_ssh_target}:${BACKUP_SSH_PORT} with a key"
+                echo -e "${TAB}  Set up key auth: ${BL}ssh-copy-id -p ${BACKUP_SSH_PORT} ${BACKUP_SSH_USER}@${_ssh_target}${CL}"
+                _ssh_bad=$((_ssh_bad + 1))
+            fi
+        done
+        echo ""
+        if [[ "$_ssh_bad" -gt 0 ]]; then
+            msg_warn "${_ssh_bad} of ${_ssh_total} backup(s) unreachable — those will be skipped/fail at sync time until fixed."
+            echo -e "${TAB}  You can finish setup now and fix SSH before the first sync."
         else
-            msg_warn "Could not SSH to ${BACKUP_SSH_USER}@${first_target}:${BACKUP_SSH_PORT} with a key"
-            echo -e "${TAB}  Set up key auth first: ${BL}ssh-copy-id -p ${BACKUP_SSH_PORT} ${BACKUP_SSH_USER}@${first_target}${CL}"
-            echo -e "${TAB}  (You can finish setup now and fix this before the first sync.)"
+            msg_ok "All ${_ssh_total} backup(s) reachable"
         fi
     fi
     echo ""
 
     # --- Notifications (optional, secret sealed) ---
     echo -e "${TAB}${BD}4) Gotify notifications (optional)${CL}"
+    echo -e "${TAB}  ${INFO} An IP or hostname is fine (http is assumed). Only prefix ${BL}https://${CL} if your Gotify uses TLS."
     read -rp "  Gotify server URL (blank to skip) [${GOTIFY_URL}]: " _v
     if [[ -n "$_v" ]]; then
         GOTIFY_URL="$_v"; settings_set GOTIFY_URL "$_v"
