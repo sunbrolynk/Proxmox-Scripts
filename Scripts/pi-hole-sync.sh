@@ -26,7 +26,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pihole-sync"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -123,6 +123,13 @@ show_help() {
     echo ""
     echo -e "${TAB}${GN}--list${CL}"
     echo -e "${TAB}${TAB}List local Teleporter backups."
+    echo ""
+    echo -e "${TAB}${GN}--setup${CL}"
+    echo -e "${TAB}${TAB}Guided setup wizard — walks every setting, seals the Gotify token,"
+    echo -e "${TAB}${TAB}saves your answers, and optionally sets a schedule. Re-runnable."
+    echo ""
+    echo -e "${TAB}${GN}--set-cred ${BL}<name>${CL}"
+    echo -e "${TAB}${TAB}Seal a secret (e.g. gotify-token) read from stdin via systemd-creds."
     echo ""
     echo -e "${TAB}${GN}--test-notify${CL}"
     echo -e "${TAB}${TAB}Send a test notification to Gotify."
@@ -246,6 +253,11 @@ load_settings() {
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         key="${line%%=*}"; val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
         case "$key" in
+            BACKUP_PIHOLES) BACKUP_PIHOLES="$val" ;;
+            BACKUP_SSH_USER) BACKUP_SSH_USER="$val" ;;
+            BACKUP_SSH_PORT) BACKUP_SSH_PORT="$val" ;;
+            LOCAL_BACKUP_DIR) LOCAL_BACKUP_DIR="$val" ;;
+            RETENTION_COUNT) RETENTION_COUNT="$val" ;;
             GOTIFY_URL) GOTIFY_URL="$val" ;;
             GOTIFY_PRIORITY) GOTIFY_PRIORITY="$val" ;;
             INSTALL_NUDGE_DISMISSED) INSTALL_NUDGE_DISMISSED="$val" ;;
@@ -742,6 +754,83 @@ do_set_cred() {
     echo "Sealed '${name}' via ${method}" >&2; exit 0
 }
 
+is_first_run() { [[ ! -f "$SETTINGS_FILE" ]]; }
+
+# Guided setup wizard — walks every setting, seals the token, persists the rest.
+# Settings file becomes the source of truth (config-block vars are fallback defaults).
+run_setup() {
+    header_info
+    echo -e "${TAB}${BD}Guided Setup${CL}"
+    echo -e "${TAB}Answer each prompt. Press Enter to keep the ${BL}[current]${CL} value."
+    echo ""
+
+    # --- Backup Pi-hole targets ---
+    echo -e "${TAB}${BD}1) Backup Pi-hole(s)${CL}"
+    read -rp "  Backup Pi-hole IP(s), space-separated [${BACKUP_PIHOLES}]: " _v
+    [[ -n "$_v" ]] && { BACKUP_PIHOLES="$_v"; settings_set BACKUP_PIHOLES "$_v"; }
+    read -rp "  SSH user on the backup(s) [${BACKUP_SSH_USER}]: " _v
+    [[ -n "$_v" ]] && { BACKUP_SSH_USER="$_v"; settings_set BACKUP_SSH_USER "$_v"; }
+    read -rp "  SSH port [${BACKUP_SSH_PORT}]: " _v
+    [[ -n "$_v" ]] && { BACKUP_SSH_PORT="$_v"; settings_set BACKUP_SSH_PORT "$_v"; }
+    echo ""
+
+    # --- Local backups ---
+    echo -e "${TAB}${BD}2) Local backups${CL}"
+    read -rp "  Local archive directory [${LOCAL_BACKUP_DIR}]: " _v
+    [[ -n "$_v" ]] && { LOCAL_BACKUP_DIR="$_v"; settings_set LOCAL_BACKUP_DIR "$_v"; }
+    read -rp "  How many local backups to keep [${RETENTION_COUNT}]: " _v
+    [[ -n "$_v" ]] && { RETENTION_COUNT="$_v"; settings_set RETENTION_COUNT "$_v"; }
+    echo ""
+
+    # --- SSH key check ---
+    echo -e "${TAB}${BD}3) SSH connectivity${CL}"
+    local first_target; first_target="${BACKUP_PIHOLES%% *}"
+    if [[ -n "$first_target" ]]; then
+        msg_info "Testing SSH to ${first_target}"
+        if ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${first_target}" "echo ok" &>/dev/null; then
+            msg_ok "SSH to ${first_target} works (key-based)"
+        else
+            msg_warn "Could not SSH to ${BACKUP_SSH_USER}@${first_target}:${BACKUP_SSH_PORT} with a key"
+            echo -e "${TAB}  Set up key auth first: ${BL}ssh-copy-id -p ${BACKUP_SSH_PORT} ${BACKUP_SSH_USER}@${first_target}${CL}"
+            echo -e "${TAB}  (You can finish setup now and fix this before the first sync.)"
+        fi
+    fi
+    echo ""
+
+    # --- Notifications (optional, secret sealed) ---
+    echo -e "${TAB}${BD}4) Gotify notifications (optional)${CL}"
+    read -rp "  Gotify server URL (blank to skip) [${GOTIFY_URL}]: " _v
+    if [[ -n "$_v" ]]; then
+        GOTIFY_URL="$_v"; settings_set GOTIFY_URL "$_v"
+        echo -e "${TAB}  ${INFO} The token is sealed (encrypted), never written in plaintext."
+        read -rsp "  Gotify application token: " _tok; echo ""
+        if [[ -n "$_tok" ]]; then
+            local m; m=$(printf '%s' "$_tok" | secret_set gotify-token)
+            msg_ok "Token sealed via ${m}"
+            require_dep curl curl "curl" || true
+        fi
+        read -rp "  Notification priority (1-10) [${GOTIFY_PRIORITY}]: " _v
+        [[ -n "$_v" ]] && { GOTIFY_PRIORITY="$_v"; settings_set GOTIFY_PRIORITY "$_v"; }
+    elif [[ -n "$GOTIFY_URL" ]]; then
+        : # keep existing
+    else
+        msg_info "Skipping notifications"
+    fi
+    echo ""
+
+    # --- Schedule (optional, gated on install) ---
+    echo -e "${TAB}${BD}5) Automatic sync schedule (optional)${CL}"
+    read -rp "  Set up a recurring schedule now? [y/N]: " _v
+    if [[ "$_v" =~ ^[Yy]$ ]]; then
+        manage_cron   # handles install-gate + frequency picker + verified write; exits after
+    fi
+
+    echo ""
+    msg_ok "Setup complete. Settings saved to ${BL}${SETTINGS_FILE}${CL}"
+    echo -e "${TAB}Re-run anytime with ${BL}${SCRIPT_NAME} --setup${CL} to change anything."
+    echo ""
+}
+
 manage_cron() {
     header_info
     echo -e "${TAB}${BD}Schedule Manager${CL}"
@@ -876,6 +965,7 @@ i=0
 while [[ $i -lt ${#ARGS[@]} ]]; do
     case "${ARGS[$i]:-}" in
         --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
+        --setup) header_info; run_setup; exit 0 ;;
         --test-notify) test_gotify ;;
         --schedule) manage_cron ;;
         --list) list_backups ;;
@@ -918,6 +1008,14 @@ fi
 # Preflight
 preflight_checks
 
+# First-run: auto-offer guided setup when nothing is configured yet.
+if [[ "$INTERACTIVE" == true ]] && is_first_run; then
+    echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
+    read -rp "  Run the guided setup now? [Y/n]: " _ans
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then run_setup; fi
+    echo ""
+fi
+
 # Interactive menu
 if [[ "$INTERACTIVE" == true ]]; then
     PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -936,9 +1034,10 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}6)${CL} List stored backups"
     echo -e "${TAB}  ${GN}7)${CL} Test Gotify notification"
     echo -e "${TAB}  ${GN}8)${CL} Manage cron schedule"
+    echo -e "${TAB}  ${GN}9)${CL} Guided setup (reconfigure everything)"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-8/q]: " choice
+    read -rp "  Select an option [1-9/q]: " choice
 
     case "$choice" in
         1) ;;
@@ -949,6 +1048,7 @@ if [[ "$INTERACTIVE" == true ]]; then
         6) list_backups ;;
         7) test_gotify ;;
         8) manage_cron ;;
+        9) run_setup; exit 0 ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
