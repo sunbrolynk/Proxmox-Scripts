@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -1155,9 +1155,11 @@ if [[ "$DO_REMOUNT_ALL" == true ]]; then
 fi
 
 # Run health checks
+CHECK_RESULT=0
 if run_checks "$DRY_RUN"; then
     msg_ok "All NFS mounts healthy"
 else
+    CHECK_RESULT=$?
     if [[ "$DRY_RUN" == true ]]; then
         msg_warn "Stale mounts detected (dry run — no action taken)"
     else
@@ -1165,3 +1167,5 @@ else
     fi
 fi
 echo ""
+# Exit non-zero when problems were found, so cron / monitoring wrappers see it.
+exit "$CHECK_RESULT"
