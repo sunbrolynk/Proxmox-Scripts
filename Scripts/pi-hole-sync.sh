@@ -39,7 +39,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pihole-sync"
-SCRIPT_VERSION="1.2.6"
+SCRIPT_VERSION="1.3.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -621,7 +621,7 @@ restore_backup() {
     local RESTORE_FILE="${1:-}"
 
     header_info
-    echo -e "${TAB}${BD}Restore Teleporter Backup to Primary${CL}"
+    echo -e "${TAB}${BD}Restore Teleporter Backup${CL}"
     echo ""
 
     # If no file specified, show list and prompt
@@ -671,39 +671,99 @@ restore_backup() {
     RESTORE_NAME=$(basename "$RESTORE_FILE")
     echo -e "${TAB}  Restoring: ${GN}${RESTORE_NAME}${CL}"
     echo ""
-    read -rp "  This will overwrite the primary Pi-hole's config. Continue? [y/N]: " confirm
-    if [[ "${confirm,,}" != "y" ]]; then
+
+    # --- Choose the restore TARGET ---------------------------------------
+    # A Teleporter import is the same operation whether the destination is the
+    # primary or a backup (it just applies a config archive to a Pi-hole), so we
+    # let the user pick any target. Removing the "always the primary" assumption
+    # removes a safety rail, so a typed-IP confirmation is required below.
+    local PRIMARY_IP
+    PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    echo -e "${TAB}${BD}Where should this be restored?${CL}"
+    echo ""
+    local TARGETS=() n=0
+    n=$((n+1)); TARGETS+=("$PRIMARY_IP")
+    echo -e "${TAB}  ${GN}${n})${CL} Primary — this machine (${PRIMARY_IP})"
+    local _bt
+    for _bt in ${BACKUP_PIHOLES}; do
+        n=$((n+1)); TARGETS+=("$_bt")
+        echo -e "${TAB}  ${GN}${n})${CL} ${_bt}  ${YW}(configured backup)${CL}"
+    done
+    local _other=$((n+1))
+    echo -e "${TAB}  ${GN}${_other})${CL} Other (enter an IP / hostname)"
+    echo -e "${TAB}  ${RD}q)${CL} Cancel"
+    echo ""
+    read -rp "  Select target [1-${_other}/q]: " _tsel
+    [[ "${_tsel,,}" == "q" ]] && { echo ""; msg_ok "Exiting. No changes made."; echo ""; exit 0; }
+
+    local TARGET=""
+    if [[ "$_tsel" == "$_other" ]]; then
+        read -rp "  Target IP / hostname: " TARGET
+        [[ -z "${TARGET// }" ]] && { msg_error "No target entered"; exit 1; }
+    elif [[ "$_tsel" =~ ^[0-9]+$ ]] && [[ "$_tsel" -ge 1 ]] && [[ "$_tsel" -le "$n" ]]; then
+        TARGET="${TARGETS[$((_tsel - 1))]}"
+    else
+        msg_error "Invalid selection"; exit 1
+    fi
+
+    # Is the target this machine (local import) or remote (push over SSH)?
+    local IS_LOCAL=false
+    if [[ "$TARGET" == "$PRIMARY_IP" || "$TARGET" == "localhost" || "$TARGET" == "127.0.0.1" ]]; then
+        IS_LOCAL=true
+    fi
+
+    # --- Typed-IP guardrail ----------------------------------------------
+    echo ""
+    echo -e "${TAB}${RD}⚠  This will OVERWRITE the Pi-hole configuration at ${BD}${TARGET}${CL}${RD}.${CL}"
+    echo -e "${TAB}   Restoring: ${RESTORE_NAME}"
+    echo ""
+    read -rp "  Type the target to confirm (${TARGET}): " _confirm
+    if [[ "$_confirm" != "$TARGET" ]]; then
         echo ""
-        msg_ok "Exiting. No changes made."
+        msg_ok "Target not confirmed — no changes made."
         echo ""
         exit 0
     fi
     echo ""
 
-    # Import
-    msg_info "Importing backup on primary"
-    local IMPORT_OUTPUT
-    IMPORT_OUTPUT=$(pihole-FTL --teleporter "$RESTORE_FILE" 2>&1)
-    if [[ $? -ne 0 ]]; then
-        msg_error "Import failed"
-        echo -e "${TAB}  Output: ${IMPORT_OUTPUT}"
-        exit 1
+    # --- Apply -----------------------------------------------------------
+    local IMPORT_OUTPUT rc=0
+    if [[ "$IS_LOCAL" == true ]]; then
+        msg_info "Importing backup locally (${TARGET})"
+        IMPORT_OUTPUT=$(pihole-FTL --teleporter "$RESTORE_FILE" 2>&1) || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            msg_error "Import failed"; echo -e "${TAB}  Output: ${IMPORT_OUTPUT}"; exit 1
+        fi
+        msg_ok "Imported on ${TARGET}"
+        msg_info "Reloading DNS"; pihole reloaddns &>/dev/null; msg_ok "DNS reloaded"
+        msg_info "Updating gravity (this may take a moment)"
+        pihole -g &>/dev/null && msg_ok "Gravity updated" || msg_warn "Gravity update returned non-zero"
+    else
+        # Remote restore reuses the same push mechanism as a sync: copy the
+        # archive over, import it remotely, then reload DNS + gravity remotely.
+        msg_info "Verifying SSH to ${TARGET}"
+        if ! ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" "command -v pihole-FTL" &>/dev/null; then
+            msg_error "Cannot SSH to ${BACKUP_SSH_USER}@${TARGET}:${BACKUP_SSH_PORT} (or pihole-FTL missing there)"
+            exit 1
+        fi
+        msg_ok "SSH OK"
+        local REMOTE_TMP="/tmp/${RESTORE_NAME}"
+        msg_info "Copying archive to ${TARGET}"
+        if ! scp -P "${BACKUP_SSH_PORT}" -q "$RESTORE_FILE" "${BACKUP_SSH_USER}@${TARGET}:${REMOTE_TMP}"; then
+            msg_error "Copy to ${TARGET} failed"; exit 1
+        fi
+        msg_ok "Archive copied"
+        msg_info "Importing on ${TARGET}"
+        IMPORT_OUTPUT=$(ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" \
+            "pihole-FTL --teleporter '${REMOTE_TMP}' && pihole reloaddns && pihole -g; rm -f '${REMOTE_TMP}'" 2>&1) || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            msg_error "Remote import failed"; echo -e "${TAB}  Output: ${IMPORT_OUTPUT}"; exit 1
+        fi
+        msg_ok "Imported on ${TARGET} (DNS + gravity reloaded)"
     fi
-    local IMPORT_COUNT
-    IMPORT_COUNT=$(echo "$IMPORT_OUTPUT" | grep -c "^Imported" || echo "0")
-    msg_ok "Imported ${IMPORT_COUNT} items"
-
-    # Reload DNS
-    msg_info "Reloading DNS"
-    pihole reloaddns &>/dev/null
-    msg_ok "DNS reloaded"
-
-    # Update gravity
-    msg_info "Updating gravity (this may take a moment)"
-    pihole -g &>/dev/null && msg_ok "Gravity updated" || msg_warn "Gravity update returned non-zero"
 
     echo ""
-    msg_ok "Restore complete!"
+    msg_ok "Restore complete → ${GN}${TARGET}${CL}"
     echo ""
     exit 0
 }
