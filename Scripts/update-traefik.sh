@@ -43,7 +43,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.3.3"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -351,12 +351,13 @@ install_self() {
     msg_warn "Could not install to ${SCRIPT_INSTALL_DEST}"; return 1
 }
 require_installed_for_schedule() {
+    SCHEDULE_INSTALL_DETOUR=false
     installed_ok && return 0
     echo ""
     msg_warn "Scheduling needs the script at ${SCRIPT_INSTALL_DEST} — cron runs that exact path."
     read -rp "  Install it there now? [Y/n]: " a
     if [[ ! "$a" =~ ^[Nn]$ ]]; then
-        install_self && { settings_set INSTALL_NUDGE_DISMISSED ""; INSTALL_NUDGE_DISMISSED=""; return 0; }
+        install_self && { settings_set INSTALL_NUDGE_DISMISSED ""; INSTALL_NUDGE_DISMISSED=""; SCHEDULE_INSTALL_DETOUR=true; return 0; }
         return 1
     fi
     msg_warn "Cannot schedule without installing first."; return 1
@@ -436,6 +437,17 @@ manage_cron() {
             echo ""; exit 1
         fi
         require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
+        # If an interactive install detour happened, we've already broken the
+        # non-interactive contract — so confirm before committing the schedule
+        # (consenting to "install" isn't the same as consenting to "schedule now").
+        if [[ "${SCHEDULE_INSTALL_DETOUR:-false}" == true ]]; then
+            echo ""
+            read -rp "  Set schedule ${DIRECT_EXPR} now? [Y/n]: " _sc
+            if [[ "$_sc" =~ ^[Nn]$ ]]; then
+                msg_warn "Installed, but schedule not set. Run --schedule \"${DIRECT_EXPR}\" again when ready."
+                echo ""; exit 0
+            fi
+        fi
         local NEW_CRON="${DIRECT_EXPR} ${CRON_CMD}"
         { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "$NEW_CRON"; } | crontab -
         if crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"; then
