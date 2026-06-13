@@ -43,7 +43,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -1439,6 +1439,12 @@ for arg in "${@:-}"; do
     esac
 done
 
+# Capture first-run status NOW, before the install nudge can write a settings
+# file (the nudge's "skip" path calls settings_set, which would create the file
+# and make a later is_first_run check wrongly return false — see finding #3).
+WAS_FIRST_RUN=false
+if is_first_run; then WAS_FIRST_RUN=true; fi
+
 # --check: show status and exit
 if [[ "$CHECK_ONLY" == true ]]; then
     echo ""
@@ -1471,7 +1477,7 @@ if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSE
 fi
 
 # First-run: auto-offer guided setup when nothing is configured yet.
-if [[ "$INTERACTIVE" == true ]] && is_first_run; then
+if [[ "$INTERACTIVE" == true ]] && [[ "$WAS_FIRST_RUN" == true ]]; then
     echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
     read -rp "  Run the guided setup now? [Y/n]: " _ans
     if [[ ! "$_ans" =~ ^[Nn]$ ]]; then guided_setup; fi
