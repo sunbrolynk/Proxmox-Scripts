@@ -228,7 +228,8 @@ Automates Pi-hole configuration sync from a primary instance to one or more back
 - Sync to multiple backup Pi-holes simultaneously (space-separated IP list)
 - Selective sync with `--skip-settings` to preserve each backup's unique passwords, network config, and web interface settings
 - Diff display (`--diff`) to compare adlists, domains, clients, and groups between primary and backups before syncing
-- Restore mode (`--restore`) to restore a specific backup to the primary with interactive file picker
+- **Targeted restore** (`--restore`) — restore any stored Teleporter archive to **any target you choose**: the primary, a configured backup, or a custom IP/hostname. Because a Teleporter import is the same operation regardless of destination, restore and sync share one mechanism. A typed-IP confirmation gate protects against overwriting the wrong box.
+- **Guided setup** (`--setup`) — walks every setting, seals the Gotify token, saves your answers, and optionally schedules; auto-offered on first run. No config-file editing required.
 - Automatic gravity update (`pihole -g`) on backups after every sync
 - Preflight checks — verifies Pi-hole and SSH on all targets before syncing
 - Local backup archive with configurable retention (default: 7)
@@ -263,8 +264,8 @@ sudo pihole-sync                          # Interactive menu — 8 options
 sudo pihole-sync -y                       # Sync without prompts (for cron)
 sudo pihole-sync --skip-settings          # Sync but keep backup's passwords/network
 sudo pihole-sync --diff                   # Compare primary vs backups, no changes
-sudo pihole-sync --restore                # Restore backup to primary (interactive picker)
-sudo pihole-sync --restore /path/to/file  # Restore specific backup file
+sudo pihole-sync --restore                # Restore an archive to a chosen target (interactive)
+sudo pihole-sync --restore /path/to/file  # Restore a specific archive (then pick target)
 sudo pihole-sync --backup-only            # Local backup only, no sync
 sudo pihole-sync --list                   # List stored backups with sizes and dates
 sudo pihole-sync --test-notify            # Test Gotify notification

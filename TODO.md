@@ -166,13 +166,14 @@ install-gated scheduling) into the template and the other cron-worthy scripts.
 
 - [x] **script-template.sh → v2.0.0** — hardened `cron_write`, `require_dep`, sealed-credential
       helpers (dormant unless used), per-script `CRON_PRESETS`, help-table exclusion warning
-- [x] **pi-hole-sync.sh → v1.1.0** — killed URL-token leak, hardened cron, sealing + `--set-cred`
-- [x] **nfs-watchdog.sh → v1.1.0** — same; watchdog intervals (5/10/15/30min/hourly) kept
-- [x] **update-traefik.sh → v1.1.0** — same; update intervals (daily/12h/weekly) kept
-- [x] Two findings logged in SECURITY.md: Gotify URL-token leak (all 3) + cron silent-fail (all 3)
-- [ ] **Hardware-validate all four on the sandbox** — cron-write logic + sealing proven in
-      isolation, but none has run end-to-end on a real box yet. Priority paths per script:
-      empty-crontab schedule write, and `--set-cred gotify-token` → `--test-notify` round-trip.
+- [x] **pi-hole-sync.sh → v1.3.1** — HARDWARE-VALIDATED (full suite on 3-Pi-hole sandbox). Started
+      at v1.1.0 (URL-token leak, hardened cron, sealing); guided wizard added; 8 findings fixed during
+      hardware test; targeted-restore feature added. See `TESTING-pi-hole-sync.md` for the full record.
+- [x] **nfs-watchdog.sh → v1.1.0** — converged; same; watchdog intervals kept. NOT yet hardware-tested.
+- [x] **update-traefik.sh → v1.2.0** — converged + fail-closed checksum. NOT yet hardware-tested.
+- [ ] **Hardware-validate nfs-watchdog + update-traefik** on the sandbox (pi-hole-sync DONE ✅).
+      Each needs its own env (nfs-watchdog: real NFS + stale-mount sim; update-traefik: Traefik
+      systemd service + checksum-URL-block test).
 - [ ] After validation: update README per-script sections for the new flags/behavior
 
 ### Guided-wizard rollout (house standard — PATTERNS.md 22)
@@ -182,13 +183,23 @@ or scheduling must have a config-backup-style guided wizard. Settings file is so
 config block is fallback default. Build one script at a time, hardware-tested each.
 
 - [x] Standard documented (CLAUDE.md design principle, PATTERNS.md #22 with persistence contract, README promise)
-- [ ] **pi-hole-sync** — `--setup` wizard: walk BACKUP_PIHOLES, SSH user/port, retention, Gotify
-      URL + seal token, schedule. Extend `load_settings` whitelist to all of these. (do first — most settings)
+- [x] **pi-hole-sync** — `--setup` wizard built + HARDWARE-VALIDATED (v1.3.1). Persistence round-trip,
+      sealed token, multi-target SSH check all confirmed on real hardware.
 - [ ] **nfs-watchdog** — `--setup` wizard: CHECK_TIMEOUT, AUTO_REMOUNT, Gotify, schedule
 - [ ] **update-traefik** — `--setup` wizard: the TRAEFIK_* paths/service/port settings, Gotify, schedule
 - [ ] Each: config-block vars become fallback defaults overridden by the settings file; hardware-test
       the persistence (set via wizard → re-run → values remembered) + sealing + scheduling
 - [ ] Promote a reusable `run_setup` skeleton into script-template.sh once the pattern is proven across all three
+
+#### Lessons from pi-hole-sync to APPLY when building the next two wizards (fix once, not 3×)
+- [ ] **Flow order:** preflight → install-nudge → first-run-setup → menu (matches PCB). Don't nudge before preflight.
+- [ ] **"Configured" detection:** ship the required-identity var as `""` (no fake placeholder); treat
+      "configured" = settings-file-exists OR that var non-empty. Use the SAME test in `preflight` and `is_first_run`.
+- [ ] **Multi-target checks:** if a script has N targets, the wizard/preflight must check ALL N, not just the first.
+- [ ] **Don't assume a binary exists on the target** — verify (the `sqlite3`-absent-on-v6 / `pihole-FTL sqlite3` lesson).
+- [ ] **`python3`-for-JSON latent dep** is in the shared Gotify helper across ALL converged scripts — add
+      `require_dep python3` or a shell JSON fallback once, in the template, so all inherit it.
+- [ ] **Test methodology:** a true "fresh box" reset must wipe install path + state dir + cron, not just the script copy.
 
 ### Supply-chain hardening (update-traefik)
 

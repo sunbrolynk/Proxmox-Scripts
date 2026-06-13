@@ -124,7 +124,17 @@ After hardening `pve-config-backup.sh`, the proven patterns were promoted into `
 | 2026-06-12 | script-template.sh → 2.0.0 | The template was **propagating** the cron-write silent-fail bug and a plaintext-Gotify pattern into every new script spawned from it | Template now ships hardened `cron_write`, `require_dep`, sealed-credential helpers (dormant unless a secret is used), per-script `CRON_PRESETS`, and a help-table exclusion warning |
 | 2026-06-12 | update-traefik → 1.2.0 | **Checksum verification failed open.** When the SHA256 checksums file couldn't be fetched, the updater printed "skipping verification" and installed the binary anyway — so an attacker (or network condition) that blocked *only* the checksum URL silently downgraded the install to unverified | Now fails **closed**: a missing/unparseable checksum aborts under cron, or prompts (default No) interactively; only the explicit `--insecure-skip-checksum` flag overrides. A checksum *mismatch* is always fatal with no override |
 
-> Lesson worth keeping: a bug in the *template* is a bug multiplier — it ships silently into every future script. Auditing the template is higher-leverage than auditing any single script. The URL-token leak also shows that "we have a notification feature" is a security surface, not just a convenience.
+### pi-hole-sync hardware test (2026-06-13, v1.3.1) — security-relevant findings
+
+Full hardware validation on a 3-Pi-hole sandbox. Most findings were UX/correctness (see `TESTING-pi-hole-sync.md` for the complete list of 8); the security-relevant ones:
+
+| Date | Script / Version | Finding | Resolution |
+|------|------------------|---------|------------|
+| 2026-06-13 | pi-hole-sync → 1.3.0 | **Targeted restore removes a safety rail.** Restore used to be hard-locked to the primary; it now lets the user restore an archive to *any* target (primary / backup / custom IP). Letting a destructive overwrite hit an arbitrary IP without a guard is a foot-gun (wrong-box overwrite) | Added a **typed-IP confirmation gate** (must type the exact target IP/host to proceed) before any overwrite — friction scaled to danger, mirroring PCB's typed-`RESTORE` gate. Verified it hard-aborts on a mistyped confirmation. |
+| 2026-06-13 | pi-hole-sync → 1.3.1 | **Silent-failure masked by fallback.** `--diff` used the system `sqlite3` (absent on Pi-hole v6) and every query fell back to `?` via `\|\| echo "?"` — the feature had *never worked* but never errored, so the failure was invisible | Switched to the bundled `pihole-FTL sqlite3`. Broader lesson: a `\|\| echo <placeholder>` fallback can hide total failure — prefer surfacing the error, or at least make "all placeholders" detectable. |
+| 2026-06-13 | (latent, all converged scripts) | `send_gotify`/`test_gotify` depend on `python3` for JSON encoding with the error swallowed (`2>/dev/null`); a host without python3 would emit an invalid body and get a confusing HTTP 400 with no hint | Not exploitable, but a robustness gap. Flagged for a `require_dep python3` or a shell-based JSON fallback. Affects the shared helper in all converged scripts. |
+
+> Lesson worth keeping: a bug in the *template* is a bug multiplier — it ships silently into every future script. Auditing the template is higher-leverage than auditing any single script. The URL-token leak also shows that "we have a notification feature" is a security surface, not just a convenience. And from pi-hole-sync: a `|| echo "?"` style fallback can turn a total feature failure into something invisible — fallbacks should never silently mask "this never worked."
 
 ## Best Practices for Contributors
 
