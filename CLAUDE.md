@@ -197,7 +197,7 @@ Not every script needs these, but when a script must store a replayable secret, 
 |--------|---------|--------|
 | update-traefik.sh | Update Traefik binary and Traefik Manager | Active — v1.2.0 (sealed Gotify, hardened cron, fail-closed checksum) |
 | pct-force-destroy.sh | Force destroy LXCs with stale NFS locks | Active |
-| pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active — v1.1.0 (sealed Gotify + hardened cron) |
+| pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active — v1.2.0 (guided wizard + sealed Gotify + hardened cron) |
 | nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active — v1.1.0 (sealed Gotify + hardened cron) |
 | pve-config-backup.sh | Back up Proxmox VE host config (the gap PBS/vzdump leave); guided restore wizard + scriptable restore CLI | Active — **v1.3.4**, hardware-validated |
 

@@ -40,6 +40,15 @@ Every script and PR is reviewed against the checklist below before being merged.
   - No third-party mirrors, pastebins, or URL shorteners
 - All download URLs must be deterministic and auditable (no redirects through unknown services)
 
+### Supply-Chain Hardening (downloads of executable artifacts)
+
+Any script that downloads a **runnable artifact** (a binary, archive, or installer — *not* an apt package, which apt verifies itself) must:
+
+- **Verify a SHA256 checksum and fail closed.** A *mismatch* always aborts with no override. A *missing/unfetchable* checksum aborts under automation (cron) and prompts (default No) interactively; the only bypass is an explicit, clearly-named flag (e.g. `--insecure-skip-checksum`). Never silently install an unverified artifact — that "fail-open" downgrade is itself an attack surface (block the checksum URL → unverified install).
+- **Understand what the checksum does and does not prove.** A same-origin checksum (binary and hash from the same release page) proves *integrity in transit* — it defends against a poisoned mirror or MITM. It does **not** defend against a compromised upstream (hijacked maintainer account or poisoned CI), where the malicious artifact ships *with a valid matching checksum*. This is the Shai-Hulud / npm-worm class of attack. Treat "checksum verified" as "I got what was published," not "what was published is safe."
+- **Prefer version pinning over `latest`.** Auto-pulling `latest` means a malicious new upstream release is grabbed automatically with no human in the loop. Where practical, require an explicit version and/or maintain out-of-band pinned hashes for known-good versions so a swapped release fails verification even if its own checksum matches.
+- Distro packages (`apt`) are exempt — apt already does GPG-signed metadata + per-package hash verification, which a wrapper script cannot improve on.
+
 ### File System Safety
 - No writing outside the script's declared scope
 - Temp files must be in `/tmp` with unique names
@@ -113,6 +122,7 @@ After hardening `pve-config-backup.sh`, the proven patterns were promoted into `
 | 2026-06-12 | pi-hole-sync / nfs-watchdog / update-traefik → 1.1.0 | **Gotify token in the URL query string** (`/message?token=${GOTIFY_TOKEN}`). The token appears in `argv`, visible to any local user via `ps`, and is liable to land in proxy/access logs. This is a worse exposure than plaintext-in-a-config-variable | Switched all three to the chmod-600 curl config-header method (`X-Gotify-Key` header in a `-K` file, never in the URL); added sealed-credential support (`--set-cred gotify-token`, resolve-sealed-first) |
 | 2026-06-12 | pi-hole-sync / nfs-watchdog / update-traefik → 1.1.0 | **The cron-write silent-fail bug** (config-backup finding #2) was present in all three: unguarded `crontab -l \| grep -v "$SCRIPT_NAME" \| crontab -` aborts under `pipefail` on an empty crontab, so scheduling silently fails on a fresh node | Applied the hardened `cron_write` (`\|\| true` + verify-it-landed) to both the add and remove pipelines in each; gated scheduling on canonical-path install |
 | 2026-06-12 | script-template.sh → 2.0.0 | The template was **propagating** the cron-write silent-fail bug and a plaintext-Gotify pattern into every new script spawned from it | Template now ships hardened `cron_write`, `require_dep`, sealed-credential helpers (dormant unless a secret is used), per-script `CRON_PRESETS`, and a help-table exclusion warning |
+| 2026-06-12 | update-traefik → 1.2.0 | **Checksum verification failed open.** When the SHA256 checksums file couldn't be fetched, the updater printed "skipping verification" and installed the binary anyway — so an attacker (or network condition) that blocked *only* the checksum URL silently downgraded the install to unverified | Now fails **closed**: a missing/unparseable checksum aborts under cron, or prompts (default No) interactively; only the explicit `--insecure-skip-checksum` flag overrides. A checksum *mismatch* is always fatal with no override |
 
 > Lesson worth keeping: a bug in the *template* is a bug multiplier — it ships silently into every future script. Auditing the template is higher-leverage than auditing any single script. The URL-token leak also shows that "we have a notification feature" is a security surface, not just a convenience.
 
