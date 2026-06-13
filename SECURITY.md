@@ -136,6 +136,16 @@ Full hardware validation on a 3-Pi-hole sandbox. Most findings were UX/correctne
 
 > Lesson worth keeping: a bug in the *template* is a bug multiplier — it ships silently into every future script. Auditing the template is higher-leverage than auditing any single script. The URL-token leak also shows that "we have a notification feature" is a security surface, not just a convenience. And from pi-hole-sync: a `|| echo "?"` style fallback can turn a total feature failure into something invisible — fallbacks should never silently mask "this never worked."
 
+### nfs-watchdog hardware test (2026-06-13, v1.3.3) — safety-relevant findings
+
+| Date | Script / Version | Finding | Resolution |
+|------|------------------|---------|------------|
+| 2026-06-13 | nfs-watchdog → 1.3.0 | **A failed remount destroyed the mount it was meant to protect.** The remount lazy-unmounted *before* confirming it could remount; against a down server it tore down the degraded-but-present mount and couldn't restore it. The next check then saw "no mounts" and reported HEALTHY — silently masking the outage (a monitoring blindspot far worse than the original problem). | Redesigned to a three-state model (healthy / stale-server-reachable / server-unavailable). A reachability probe classifies first; the watchdog NEVER unmounts a mount it can't restore, and a server outage leaves the mount untouched with a distinct alert. |
+| 2026-06-13 | nfs-watchdog → 1.2.3 | Exited 0 even when problems were detected — a cron/monitoring wrapper keying on exit code would read "all healthy" during an actual NFS failure. | Propagate the non-zero result to the script exit code. |
+| 2026-06-13 | nfs-watchdog → 1.2.2 | Readable-but-not-writable mount classified as healthy, so a downed server (writes fail, cached reads succeed) wouldn't alert. | Distinguish intentionally-`ro` (healthy) from `rw`-can't-write (degraded) via /proc/mounts options. |
+
+> Safety lesson: a self-healing tool must never make things *worse* on failure than the problem it's fixing. "Unmount then try to remount" is unsafe when the remount can fail — always confirm you can restore before you tear down. And the most dangerous failures are the *silent* ones: destroying the mount then reporting "healthy" hid the outage entirely. Test the real failure mode (down the actual server) — that's what surfaced both issues; reading the code did not.
+
 ## Best Practices for Contributors
 
 1. **Keep it simple** — fewer lines of code means fewer places for bugs

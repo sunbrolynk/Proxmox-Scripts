@@ -322,14 +322,16 @@ Detects stale or unresponsive NFS mounts before they cause cascading lock issues
 **Features:**
 - Auto-detects all NFS mounts on the node (no manual configuration)
 - Three-phase health test per mount: read, write, and latency
-- Latency measurement with color-coded thresholds (green/yellow/red)
-- Detects stale mounts before they cause lock problems
+- **Three-state classification:** healthy / *stale* (mount bad but server reachable — a remount fixes it) / *server-unavailable* (mount bad and server unreachable — a remount can't help)
+- **Safe remount — never destroys a mount it can't restore.** A reachability probe runs first; the watchdog only remounts when the server is confirmed up, and during a server outage it leaves the mount completely untouched and warns distinctly. (It only ever actively fixes genuinely *stale* mounts.)
+- Distinguishes intentionally read-only mounts (healthy) from `rw` mounts that can't be written (degraded)
 - Optional auto-remount of stale mounts (lazy first, force fallback)
-- Force remount all mounts on demand
-- Detailed status table with mount options (detects hard vs soft)
-- Gotify notifications with markdown-formatted alerts when stale mounts are found
+- Correct exit codes — non-zero when anything is wrong, so cron/monitoring wrappers see failures
+- Latency measurement with color-coded thresholds; detailed status table (detects hard vs soft)
+- **Guided setup** (`--setup`) — walks detection timeout, stale-action, Gotify, and scheduling; auto-offered on first run
+- Gotify notifications with clean labeled-line alerts (render consistently on web and mobile)
 - **Sealed Gotify credentials** — the token is sealed with `systemd-creds` (or a `chmod 600` fallback) and sent in a request header, never in the URL; seal it with `--set-cred gotify-token`
-- Built-in cron scheduler — set up automated checks without cron knowledge; scheduling is gated on canonical-path install and the cron write is verified
+- Built-in cron scheduler — interactive, or one-shot `--schedule "<cron expr>"` for power users; scheduling is gated on canonical-path install and the cron write is verified
 - CTRL+C safe
 - Designed to run on every cluster node
 
@@ -351,14 +353,16 @@ done
 **Usage:**
 
 ```bash
-sudo nfs-watchdog                    # Interactive menu — 6 options
+sudo nfs-watchdog                    # Interactive menu
 sudo nfs-watchdog -y                 # Run checks without prompts (for cron)
+sudo nfs-watchdog --setup            # Guided setup wizard (auto-offered on first run)
 sudo nfs-watchdog --status           # Detailed status of all NFS mounts
 sudo nfs-watchdog --dry-run          # Check only, no remount or notify
 sudo nfs-watchdog --remount          # Force remount all NFS mounts
 sudo nfs-watchdog --test-notify      # Test Gotify notification
 sudo nfs-watchdog --set-cred gotify-token  # Seal the Gotify token (reads value from stdin)
-sudo nfs-watchdog --schedule         # Set up, change, or remove cron schedule
+sudo nfs-watchdog --schedule         # Interactive cron schedule manager
+sudo nfs-watchdog --schedule "*/5 * * * *"  # Set schedule non-interactively
 sudo nfs-watchdog -h                 # Full man-style help with config line numbers
 ```
 
