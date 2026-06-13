@@ -8,17 +8,30 @@
 # using the built-in Teleporter CLI. Designed for Pi-hole v6+.
 
 # ============================================================
-# CONFIGURATION — adjust these for your setup
+# CONFIGURATION
 # ============================================================
-BACKUP_PIHOLES="192.168.1.2"          # Backup Pi-hole IP(s), space-separated for multiple
-                                      # Example: "192.168.1.2 192.168.1.3 192.168.1.4"
-BACKUP_SSH_USER="root"                # SSH user on the backup Pi-hole(s)
-BACKUP_SSH_PORT="22"                  # SSH port on the backup Pi-hole(s)
+# You can configure this script two ways:
+#   • Run the guided setup:  pihole-sync --setup   (recommended; seals secrets for you)
+#   • Or edit the values below directly (power users)
+# Either way works — the script detects whichever you've used.
+# ------------------------------------------------------------
+
+# --- Required: backup target(s) ------------------------------
+# There is no sensible default for this — you must supply it (via --setup or here).
+BACKUP_PIHOLES=""                      # Backup Pi-hole IP(s), space-separated
+                                       #   e.g. "192.168.1.2 192.168.1.3 192.168.1.4"
+
+# --- Tunable: sane defaults, change only if your setup differs
+BACKUP_SSH_USER="root"                 # SSH user on the backup Pi-hole(s)
+BACKUP_SSH_PORT="22"                   # SSH port on the backup Pi-hole(s)
 LOCAL_BACKUP_DIR="/var/backups/pihole" # Where to store Teleporter archives locally
-RETENTION_COUNT=7                     # Number of local backups to keep
-GOTIFY_URL=""                         # Gotify server URL (e.g. http://10.10.3.6:80)
-GOTIFY_TOKEN=""                       # Gotify application token
-GOTIFY_PRIORITY=5                     # Gotify notification priority (1-10)
+RETENTION_COUNT=7                      # Number of local backups to keep
+
+# --- Optional: Gotify notifications (cron mode) --------------
+# Leave the token empty here and seal it instead:  pihole-sync --set-cred gotify-token
+GOTIFY_URL=""                          # Gotify server URL (e.g. http://10.10.3.6:80)
+GOTIFY_TOKEN=""                        # Gotify token (prefer --set-cred over plaintext here)
+GOTIFY_PRIORITY=5                      # Notification priority (1-10)
 # ============================================================
 
 set -euo pipefail
@@ -26,7 +39,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pihole-sync"
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.4"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -151,13 +164,18 @@ show_help() {
     # Dynamically show config variables with line numbers
     echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
     echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
-    while IFS= read -r line; do
-        local linenum var val
+    local _cfgvars="BACKUP_PIHOLES BACKUP_SSH_USER BACKUP_SSH_PORT LOCAL_BACKUP_DIR RETENTION_COUNT GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY"
+    local cfgvar
+    for cfgvar in $_cfgvars; do
+        local line linenum val
+        line=$(grep -n "^${cfgvar}=" "$SCRIPT_PATH" | head -1)
+        [[ -z "$line" ]] && continue
         linenum=$(echo "$line" | cut -d: -f1)
-        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
-        val=$(echo "$line" | cut -d= -f2- | tr -d '"')
-        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
-    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|^[0-9]*:set \|^[0-9]*:shopt \|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|SKIP_\|BACKUP_ONLY\|AUTO_YES\|BACKUP_FILE\|BACKUP_NAME\|REMOTE_\|PRIMARY_\|IMPORT_' | head -5)
+        # value = between the first = and the inline # comment, quotes/space stripped
+        val=$(echo "$line" | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '"' | xargs)
+        [[ -z "$val" ]] && val="(unset)"
+        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$cfgvar" "$linenum" "$val"
+    done
 
     echo ""
     echo -e "${BD}PREREQUISITES${CL}"
@@ -359,28 +377,46 @@ preflight_checks() {
         CRITICAL=true
     fi
 
-    # SSH to backup(s)
-    for TARGET in ${BACKUP_PIHOLES}; do
-        msg_info "Testing SSH to backup (${TARGET})"
-        if ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
-            msg_ok "SSH to backup (${TARGET}) connected"
-        else
-            msg_error "Cannot SSH to ${BACKUP_SSH_USER}@${TARGET}:${BACKUP_SSH_PORT}"
-            echo -e "${TAB}  Set up key auth: ${BL}ssh-copy-id ${BACKUP_SSH_USER}@${TARGET}${CL}"
-            CRITICAL=true
-        fi
+    # Is this an unconfigured/first-run state? Two independent signals of human
+    # interaction, EITHER of which means "configured":
+    #   (1) a settings file exists (written by guided --setup), OR
+    #   (2) BACKUP_PIHOLES is non-empty (a power user filled it in the config block).
+    # The script ships with BACKUP_PIHOLES="" specifically so that ANY non-empty
+    # value is unambiguous user intent — no fake placeholder IP that could collide
+    # with a real one or be mistaken for "untouched". Unconfigured only when BOTH
+    # signals are absent; then we skip backup checks and route the user to setup.
+    local _unconfigured=false
+    if [[ ! -f "$SETTINGS_FILE" ]] && [[ -z "${BACKUP_PIHOLES// }" ]]; then
+        _unconfigured=true
+    fi
 
-        # pihole-FTL on backup
-        if [[ "$CRITICAL" == false ]]; then
-            msg_info "Checking pihole-FTL on ${TARGET}"
-            if ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" "command -v pihole-FTL" &>/dev/null; then
-                msg_ok "pihole-FTL found on ${TARGET}"
+    if [[ "$_unconfigured" == true ]]; then
+        msg_warn "No backup Pi-holes configured yet — run guided setup to add them"
+        # skip SSH/backup reachability checks; nothing to test until configured
+    else
+        # SSH to backup(s)
+        for TARGET in ${BACKUP_PIHOLES}; do
+            msg_info "Testing SSH to backup (${TARGET})"
+            if ssh -p "${BACKUP_SSH_PORT}" -o ConnectTimeout=5 -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" "echo ok" &>/dev/null; then
+                msg_ok "SSH to backup (${TARGET}) connected"
             else
-                msg_error "pihole-FTL not found on ${TARGET}"
+                msg_error "Cannot SSH to ${BACKUP_SSH_USER}@${TARGET}:${BACKUP_SSH_PORT}"
+                echo -e "${TAB}  Set up key auth: ${BL}ssh-copy-id ${BACKUP_SSH_USER}@${TARGET}${CL}"
                 CRITICAL=true
             fi
-        fi
-    done
+
+            # pihole-FTL on backup
+            if [[ "$CRITICAL" == false ]]; then
+                msg_info "Checking pihole-FTL on ${TARGET}"
+                if ssh -p "${BACKUP_SSH_PORT}" -o BatchMode=yes "${BACKUP_SSH_USER}@${TARGET}" "command -v pihole-FTL" &>/dev/null; then
+                    msg_ok "pihole-FTL found on ${TARGET}"
+                else
+                    msg_error "pihole-FTL not found on ${TARGET}"
+                    CRITICAL=true
+                fi
+            fi
+        done
+    fi
 
     # Backup directory
     if [[ ! -d "${LOCAL_BACKUP_DIR}" ]]; then
@@ -754,7 +790,7 @@ do_set_cred() {
     echo "Sealed '${name}' via ${method}" >&2; exit 0
 }
 
-is_first_run() { [[ ! -f "$SETTINGS_FILE" ]]; }
+is_first_run() { [[ ! -f "$SETTINGS_FILE" ]] && [[ -z "${BACKUP_PIHOLES// }" ]]; }
 
 # Guided setup wizard — walks every setting, seals the token, persists the rest.
 # Settings file becomes the source of truth (config-block vars are fallback defaults).
