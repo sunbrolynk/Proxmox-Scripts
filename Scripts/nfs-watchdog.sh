@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -361,6 +361,19 @@ test_mount_writable() {
         return 0
     fi
     return 1
+}
+
+# Is this mount intentionally read-only? A write failure on an 'ro' mount is
+# expected (working as designed); a write failure on an 'rw' mount means the
+# mount is degraded (server gone, export flipped ro, etc.). We read the mount
+# options from /proc/mounts: the option list is the 4th field, e.g.
+#   server:/export /mnt/x nfs4 rw,relatime,... 0 0
+mount_is_readonly_by_design() {
+    local mountpoint="$1"
+    local opts
+    opts=$(awk -v mp="$mountpoint" '$2 == mp {print $4}' /proc/mounts 2>/dev/null | head -1)
+    # Match 'ro' as a whole option (start, between commas, or end) — not "rw".
+    [[ ",${opts}," == *",ro,"* ]]
 }
 
 test_mount_latency() {
@@ -693,7 +706,11 @@ run_checks() {
                     result="stale"
                 else
                     if ! test_mount_writable "$mountpoint"; then
-                        result="readonly"
+                        if mount_is_readonly_by_design "$mountpoint"; then
+                            result="healthy"
+                        else
+                            result="stale"
+                        fi
                     fi
                     latency=$(test_mount_latency "$mountpoint")
                     if [[ "$latency" == "timeout" ]]; then
@@ -732,10 +749,6 @@ run_checks() {
                                 FAILED_REMOUNTS+=("$mountpoint")
                             fi
                         fi
-                        ;;
-                    readonly)
-                        msg_warn "${mountpoint} — readable but NOT writable"
-                        HEALTHY_MOUNTS+=("$mountpoint")
                         ;;
                     slow)
                         msg_warn "${mountpoint} — healthy but slow (${latency}ms)"
@@ -777,8 +790,27 @@ run_checks() {
             fi
 
             if ! test_mount_writable "$mountpoint"; then
-                msg_warn "${mountpoint} — readable but NOT writable"
-                HEALTHY_MOUNTS+=("$mountpoint")
+                if mount_is_readonly_by_design "$mountpoint"; then
+                    msg_ok "${mountpoint} — healthy (read-only by design)"
+                    HEALTHY_MOUNTS+=("$mountpoint")
+                    continue
+                fi
+                # rw mount that can't be written = degraded (server gone, export
+                # flipped ro, etc.) — treat like stale so it alerts / remounts.
+                msg_error "${mountpoint} — DEGRADED (rw mount not writable — server may be down)"
+                STALE_MOUNTS+=("$mountpoint")
+
+                if [[ "$DRY_RUN_MODE" == true ]]; then
+                    [[ "$AUTO_REMOUNT" == true ]] && msg_warn "Would auto-remount ${mountpoint}"
+                    continue
+                fi
+                if [[ "$AUTO_REMOUNT" == true ]]; then
+                    if remount_nfs "$mountpoint"; then
+                        REMOUNTED_MOUNTS+=("$mountpoint")
+                    else
+                        FAILED_REMOUNTS+=("$mountpoint")
+                    fi
+                fi
                 continue
             fi
 
