@@ -6,23 +6,35 @@
 # Styled after Proxmox VE Community Scripts
 
 # ============================================================
-# CONFIGURATION — adjust these for your setup
+# CONFIGURATION
 # ============================================================
-TRAEFIK_BIN="/usr/local/bin/traefik"
-TRAEFIK_SERVICE="traefik-proxy"
-TRAEFIK_MANAGER_DIR="/opt/traefik-manager"
-TRAEFIK_MANAGER_USER="traefik-manager"
-TRAEFIK_MANAGER_SERVICE="traefik-manager"
-TRAEFIK_MANAGER_PORT="5000"
-TRAEFIK_MANAGER_REPO="chr0nzz/traefik-manager"
-TRAEFIK_DASHBOARD_PORT="8080"
-TRAEFIK_ARCH="linux_amd64"
-MIN_DISK_MB=500
-MIN_MEM_MB=256
-MIN_PYTHON="3.9"
+# You can configure this script two ways:
+#   • Run the guided setup:  update-traefik --setup   (recommended; seals secrets for you)
+#   • Or edit the values below directly (power users)
+# Either way works — the script detects whichever you've used.
+# ------------------------------------------------------------
+
+# --- Traefik & Manager paths/services (defaults match a standard install) ---
+TRAEFIK_BIN="/usr/local/bin/traefik"            # Traefik binary location
+TRAEFIK_SERVICE="traefik-proxy"                 # systemd service name for Traefik
+TRAEFIK_MANAGER_DIR="/opt/traefik-manager"      # Traefik Manager install dir (git repo)
+TRAEFIK_MANAGER_USER="traefik-manager"          # User that owns/runs the Manager
+TRAEFIK_MANAGER_SERVICE="traefik-manager"       # systemd service name for the Manager
+TRAEFIK_MANAGER_PORT="5000"                     # Manager web port
+TRAEFIK_MANAGER_REPO="chr0nzz/traefik-manager"  # GitHub repo for the Manager
+TRAEFIK_DASHBOARD_PORT="8080"                   # Traefik dashboard port
+TRAEFIK_ARCH="linux_amd64"                       # Release arch (linux_amd64 / linux_arm64)
+
+# --- Tunable: minimum-resource thresholds for preflight ------
+MIN_DISK_MB=500                       # Abort update if free disk below this
+MIN_MEM_MB=256                        # Warn/abort if available memory below this
+MIN_PYTHON="3.9"                      # Minimum Python for the Manager
+
+# --- Optional: Gotify notifications (cron mode) --------------
+# Leave the token empty here and seal it instead:  update-traefik --set-cred gotify-token
 GOTIFY_URL=""                         # Gotify server URL (e.g. http://10.10.3.6:80)
-GOTIFY_TOKEN=""                       # Gotify application token
-GOTIFY_PRIORITY=5                     # Gotify notification priority (1-10)
+GOTIFY_TOKEN=""                       # Gotify token (prefer --set-cred over plaintext here)
+GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 LOG_FILE="/var/log/update-traefik.log"  # Log file for cron mode
 # ============================================================
 
@@ -31,7 +43,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -142,11 +154,22 @@ ${TAB}${GN}--cron${CL}
 ${TAB}${TAB}Automated mode for scheduled runs. Updates all components
 ${TAB}${TAB}without prompts and sends a Gotify notification with results.
 
+${TAB}${GN}--setup${CL}
+${TAB}${TAB}Guided setup wizard — walks Traefik/Manager paths, services, ports,
+${TAB}${TAB}thresholds, Gotify (sealing the token), and scheduling. Auto-offered
+${TAB}${TAB}on first run. Re-runnable.
+
+${TAB}${GN}--set-cred ${BL}<name>${CL}
+${TAB}${TAB}Seal a secret (e.g. gotify-token) read from stdin via systemd-creds.
+
 ${TAB}${GN}--test-notify${CL}
 ${TAB}${TAB}Send a test notification to Gotify.
 
-${TAB}${GN}--schedule${CL}
-${TAB}${TAB}Set up, change, or remove the cron schedule.
+${TAB}${GN}--schedule ${BL}["<cron expr>"]${CL}
+${TAB}${TAB}No argument: interactive menu to set/change/remove the schedule.
+${TAB}${TAB}With a cron expression: set it non-interactively, e.g.
+${TAB}${TAB}  ${BL}${SCRIPT_NAME} --schedule "0 4 * * 0"${CL}
+${TAB}${TAB}Use ${BL}--schedule remove${CL} to delete the schedule.
 
 ${TAB}${GN}-h, --help${CL}
 ${TAB}${TAB}Display this help and exit.
@@ -160,16 +183,20 @@ ${TAB}File: ${BL}${SCRIPT_PATH}${CL}
 
 HELP
 
-    # Dynamically show config variables with line numbers
+    # Dynamically show config variables with line numbers (allowlist — converged standard)
     echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
     echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
-    while IFS= read -r line; do
-        local linenum var val
+    local _cfgvars="TRAEFIK_BIN TRAEFIK_SERVICE TRAEFIK_MANAGER_DIR TRAEFIK_MANAGER_USER TRAEFIK_MANAGER_SERVICE TRAEFIK_MANAGER_PORT TRAEFIK_MANAGER_REPO TRAEFIK_DASHBOARD_PORT TRAEFIK_ARCH MIN_DISK_MB MIN_MEM_MB MIN_PYTHON GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY LOG_FILE"
+    local cfgvar
+    for cfgvar in $_cfgvars; do
+        local line linenum val
+        line=$(grep -n "^${cfgvar}=" "$SCRIPT_PATH" | head -1)
+        [[ -z "$line" ]] && continue
         linenum=$(echo "$line" | cut -d: -f1)
-        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
-        val=$(echo "$line" | cut -d= -f2- | tr -d '"')
-        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
-    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|^[0-9]*:set \|^[0-9]*:shopt \|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:HOLD=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|^[0-9]*:TEMP_FILES\|SKIP_\|SPECIFIC_\|INTERACTIVE\|LATEST_\|CURRENT_\|VM_IP\|FINAL_\|MISSING_\|STOPPED_\|CRITICAL_\|ENV_' | head -13)
+        val=$(echo "$line" | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '"' | xargs)
+        [[ -z "$val" ]] && val="(unset)"
+        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$cfgvar" "$linenum" "$val"
+    done
 
     cat <<HELP
 
@@ -186,16 +213,16 @@ ${TAB}${RD}1${CL}  Error (failed preflight, download, install, or rollback)
 
 ${BD}EXAMPLES${CL}
 ${TAB}Update everything interactively:
-${TAB}  ${BL}sudo ${SCRIPT_NAME}${CL}
+${TAB}  ${BL}${SCRIPT_NAME}${CL}
 
 ${TAB}Update all without prompts (good for cron):
-${TAB}  ${BL}sudo ${SCRIPT_NAME} -y${CL}
+${TAB}  ${BL}${SCRIPT_NAME} -y${CL}
 
 ${TAB}Pin Traefik to a specific version:
-${TAB}  ${BL}sudo ${SCRIPT_NAME} v3.6.6${CL}
+${TAB}  ${BL}${SCRIPT_NAME} v3.6.6${CL}
 
 ${TAB}Update only Traefik Manager:
-${TAB}  ${BL}sudo ${SCRIPT_NAME} --manager-only${CL}
+${TAB}  ${BL}${SCRIPT_NAME} --manager-only${CL}
 
 ${BD}SEE ALSO${CL}
 ${TAB}Traefik releases:  ${BL}https://github.com/traefik/traefik/releases${CL}
@@ -263,6 +290,18 @@ load_settings() {
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         key="${line%%=*}"; val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
         case "$key" in
+            TRAEFIK_BIN) TRAEFIK_BIN="$val" ;;
+            TRAEFIK_SERVICE) TRAEFIK_SERVICE="$val" ;;
+            TRAEFIK_MANAGER_DIR) TRAEFIK_MANAGER_DIR="$val" ;;
+            TRAEFIK_MANAGER_USER) TRAEFIK_MANAGER_USER="$val" ;;
+            TRAEFIK_MANAGER_SERVICE) TRAEFIK_MANAGER_SERVICE="$val" ;;
+            TRAEFIK_MANAGER_PORT) TRAEFIK_MANAGER_PORT="$val" ;;
+            TRAEFIK_MANAGER_REPO) TRAEFIK_MANAGER_REPO="$val" ;;
+            TRAEFIK_DASHBOARD_PORT) TRAEFIK_DASHBOARD_PORT="$val" ;;
+            TRAEFIK_ARCH) TRAEFIK_ARCH="$val" ;;
+            MIN_DISK_MB) MIN_DISK_MB="$val" ;;
+            MIN_MEM_MB) MIN_MEM_MB="$val" ;;
+            MIN_PYTHON) MIN_PYTHON="$val" ;;
             GOTIFY_URL) GOTIFY_URL="$val" ;;
             GOTIFY_PRIORITY) GOTIFY_PRIORITY="$val" ;;
             INSTALL_NUDGE_DISMISSED) INSTALL_NUDGE_DISMISSED="$val" ;;
@@ -348,6 +387,7 @@ test_gotify() {
     echo ""
     [[ -z "$GOTIFY_URL" ]] && { msg_error "GOTIFY_URL not configured"; echo -e "${TAB}  Set GOTIFY_URL, then seal the token: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
     require_dep curl curl "curl" || { echo ""; exit 1; }
+    require_dep python3 python3 "python3 (for JSON encoding)" || { echo ""; exit 1; }
     local token; token="$(resolve_gotify_token)"
     [[ -z "$token" ]] && { msg_error "No Gotify token — seal one: ${BL}${SCRIPT_NAME} --set-cred gotify-token${CL}"; echo ""; exit 1; }
 
@@ -377,11 +417,40 @@ test_gotify() {
 }
 
 manage_cron() {
+    local CRON_CMD="${SCRIPT_INSTALL_DEST} --cron >> ${LOG_FILE} 2>&1"
+
+    # Non-interactive form: manage_cron "<cron expr>" (from --schedule "<expr>").
+    local DIRECT_EXPR="${1:-}"
+    if [[ -n "$DIRECT_EXPR" ]]; then
+        header_info
+        echo -e "${TAB}${BD}Schedule Manager${CL}"
+        echo ""
+        if [[ "$DIRECT_EXPR" == "remove" ]]; then
+            { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; } | crontab -
+            msg_ok "Schedule removed"; echo ""; exit 0
+        fi
+        local _fc; _fc=$(awk '{print NF}' <<<"$DIRECT_EXPR")
+        if [[ "$_fc" -ne 5 ]]; then
+            msg_error "Invalid cron expression: expected 5 fields, got ${_fc}"
+            echo -e "${TAB}  Example: ${BL}\"0 4 * * 0\"${CL}  (weekly, Sunday 4am)"
+            echo ""; exit 1
+        fi
+        require_installed_for_schedule || { echo ""; msg_warn "Not scheduled."; echo ""; exit 0; }
+        local NEW_CRON="${DIRECT_EXPR} ${CRON_CMD}"
+        { crontab -l 2>/dev/null | grep -v "${SCRIPT_NAME}" || true; echo "$NEW_CRON"; } | crontab -
+        if crontab -l 2>/dev/null | grep -q "${SCRIPT_NAME}"; then
+            msg_ok "Schedule set: ${GN}${DIRECT_EXPR}${CL}"
+            echo -e "${TAB}  ${BL}${NEW_CRON}${CL}"
+        else
+            msg_error "Schedule write failed — is cron installed and running?"
+        fi
+        echo ""; exit 0
+    fi
+
     header_info
     echo -e "${TAB}${BD}Schedule Manager${CL}"
     echo ""
 
-    local CRON_CMD="${SCRIPT_INSTALL_DEST} --cron >> ${LOG_FILE} 2>&1"
     local CURRENT_CRON
     CURRENT_CRON=$(crontab -l 2>/dev/null | grep "${SCRIPT_NAME}" || true)
 
@@ -511,11 +580,11 @@ get_current_manager_version() {
         cd "${TRAEFIK_MANAGER_DIR}"
         # Try to get the current tag, fall back to commit hash
         local tag
-        tag=$(sudo -u "${TRAEFIK_MANAGER_USER}" git describe --tags --exact-match HEAD 2>/dev/null || echo "")
+        tag=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git describe --tags --exact-match HEAD 2>/dev/null || echo "")
         if [[ -n "$tag" ]]; then
             echo "$tag"
         else
-            echo "commit-$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short HEAD 2>/dev/null)"
+            echo "commit-$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse --short HEAD 2>/dev/null)"
         fi
     else
         echo "unknown"
@@ -672,6 +741,96 @@ environment_checks() {
 # PREFLIGHT: Dependency checks with interactive fix
 # ============================================================
 
+# First run = no settings file yet (no required-identity var; paths auto-default).
+is_first_run() { [[ ! -f "$SETTINGS_FILE" ]]; }
+
+# ============================================================
+# GUIDED SETUP WIZARD
+# ============================================================
+guided_setup() {
+    header_info
+    echo -e "${TAB}${BD}Guided Setup${CL}"
+    echo -e "${TAB}Answer each prompt. Press Enter to keep the [current] value."
+    echo ""
+
+    # --- 1) Traefik paths & service ---
+    echo -e "${TAB}${BD}1) Traefik${CL}"
+    read -rp "  Traefik binary path [${TRAEFIK_BIN}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_BIN="$_v"; settings_set TRAEFIK_BIN "$_v"; }
+    read -rp "  Traefik systemd service [${TRAEFIK_SERVICE}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_SERVICE="$_v"; settings_set TRAEFIK_SERVICE "$_v"; }
+    read -rp "  Traefik dashboard port [${TRAEFIK_DASHBOARD_PORT}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_DASHBOARD_PORT="$_v"; settings_set TRAEFIK_DASHBOARD_PORT "$_v"; }
+    read -rp "  Release architecture (linux_amd64 / linux_arm64) [${TRAEFIK_ARCH}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_ARCH="$_v"; settings_set TRAEFIK_ARCH "$_v"; }
+    echo ""
+
+    # --- 2) Traefik Manager ---
+    echo -e "${TAB}${BD}2) Traefik Manager${CL}"
+    read -rp "  Manager install dir [${TRAEFIK_MANAGER_DIR}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_MANAGER_DIR="$_v"; settings_set TRAEFIK_MANAGER_DIR "$_v"; }
+    read -rp "  Manager service user [${TRAEFIK_MANAGER_USER}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_MANAGER_USER="$_v"; settings_set TRAEFIK_MANAGER_USER "$_v"; }
+    read -rp "  Manager systemd service [${TRAEFIK_MANAGER_SERVICE}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_MANAGER_SERVICE="$_v"; settings_set TRAEFIK_MANAGER_SERVICE "$_v"; }
+    read -rp "  Manager web port [${TRAEFIK_MANAGER_PORT}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_MANAGER_PORT="$_v"; settings_set TRAEFIK_MANAGER_PORT "$_v"; }
+    read -rp "  Manager GitHub repo [${TRAEFIK_MANAGER_REPO}]: " _v
+    [[ -n "$_v" ]] && { TRAEFIK_MANAGER_REPO="$_v"; settings_set TRAEFIK_MANAGER_REPO "$_v"; }
+    echo ""
+
+    # --- 3) Resource thresholds ---
+    echo -e "${TAB}${BD}3) Preflight thresholds${CL}"
+    read -rp "  Minimum free disk (MB) [${MIN_DISK_MB}]: " _v
+    [[ -n "$_v" ]] && { MIN_DISK_MB="$_v"; settings_set MIN_DISK_MB "$_v"; }
+    read -rp "  Minimum available memory (MB) [${MIN_MEM_MB}]: " _v
+    [[ -n "$_v" ]] && { MIN_MEM_MB="$_v"; settings_set MIN_MEM_MB "$_v"; }
+    read -rp "  Minimum Python version [${MIN_PYTHON}]: " _v
+    [[ -n "$_v" ]] && { MIN_PYTHON="$_v"; settings_set MIN_PYTHON "$_v"; }
+    echo ""
+
+    # --- 4) Gotify notifications (optional, token sealed) ---
+    echo -e "${TAB}${BD}4) Gotify notifications (optional)${CL}"
+    echo -e "${TAB}  ${INFO} An IP or hostname is fine (http is assumed). Only prefix ${BL}https://${CL} if your Gotify uses TLS."
+    read -rp "  Gotify server URL (blank to skip) [${GOTIFY_URL}]: " _v
+    if [[ -n "$_v" ]]; then
+        GOTIFY_URL="$_v"; settings_set GOTIFY_URL "$_v"
+        echo -e "${TAB}  ${INFO} The token is sealed (encrypted), never written in plaintext."
+        read -rsp "  Gotify application token: " _tok; echo ""
+        if [[ -n "$_tok" ]]; then
+            local m; m=$(printf '%s' "$_tok" | secret_set gotify-token)
+            msg_ok "Token sealed via ${m}"
+            require_dep curl curl "curl" || true
+            require_dep python3 python3 "python3 (for JSON encoding)" || true
+        fi
+        read -rp "  Notification priority (1-10) [${GOTIFY_PRIORITY}]: " _v
+        [[ -n "$_v" ]] && { GOTIFY_PRIORITY="$_v"; settings_set GOTIFY_PRIORITY "$_v"; }
+    else
+        msg_info "Skipping notifications"
+    fi
+    echo ""
+
+    # --- 5) Schedule (optional, gated on install) ---
+    echo -e "${TAB}${BD}5) Schedule${CL}"
+    echo -e "${TAB}  Automated update checks keep Traefik current without manual runs."
+    if installed_ok; then
+        read -rp "  Set up a cron schedule now? [Y/n]: " _v
+        [[ ! "$_v" =~ ^[Nn]$ ]] && manage_cron
+    else
+        msg_warn "Not installed to ${SCRIPT_INSTALL_DEST} yet — scheduling needs that first."
+        echo -e "${TAB}  Install via the first-run prompt, then ${BL}--schedule${CL}."
+    fi
+    echo ""
+
+    msg_ok "Setup complete."
+    echo -e "${TAB}Settings saved to ${BL}${SETTINGS_FILE}${CL}"
+    echo ""
+}
+
+# ============================================================
+# PREFLIGHT: Dependency checks with interactive fix
+# ============================================================
+
 preflight_checks() {
     echo -e "${TAB}${BL}Preflight Checks${CL}"
     echo ""
@@ -747,7 +906,7 @@ preflight_checks() {
                     msg_ok "Installed ${dep}"
                 else
                     msg_error "Failed to install ${dep}"
-                    echo -e "${TAB}  Try manually: ${YW}sudo apt install ${dep}${CL}"
+                    echo -e "${TAB}  Try manually: ${YW}apt install ${dep}${CL}"
                     echo ""
                     exit 1
                 fi
@@ -880,20 +1039,20 @@ except:
         echo ""
 
         cd "${TRAEFIK_MANAGER_DIR}"
-        sudo -u "${TRAEFIK_MANAGER_USER}" git fetch origin main --quiet 2>/dev/null
+        runuser -u "${TRAEFIK_MANAGER_USER}" -- git fetch origin main --quiet 2>/dev/null
 
         local LOCAL_HASH REMOTE_HASH
-        LOCAL_HASH=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse HEAD 2>/dev/null)
-        REMOTE_HASH=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse origin/main 2>/dev/null)
+        LOCAL_HASH=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse HEAD 2>/dev/null)
+        REMOTE_HASH=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse origin/main 2>/dev/null)
 
         if [[ "$LOCAL_HASH" == "$REMOTE_HASH" ]]; then
             msg_ok "Manager is up to date — no new changes"
         else
             local COMMIT_COUNT
-            COMMIT_COUNT=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+            COMMIT_COUNT=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
             msg_ok "${COMMIT_COUNT} new commit(s) available:"
             echo ""
-            sudo -u "${TRAEFIK_MANAGER_USER}" git log --oneline HEAD..origin/main 2>/dev/null | head -15 | while IFS= read -r line; do
+            runuser -u "${TRAEFIK_MANAGER_USER}" -- git log --oneline HEAD..origin/main 2>/dev/null | head -15 | while IFS= read -r line; do
                 echo -e "${TAB}  ${YW}•${CL} ${line}"
             done
             if [[ "$COMMIT_COUNT" -gt 15 ]] 2>/dev/null; then
@@ -952,7 +1111,7 @@ rollback_traefik() {
         msg_ok "Traefik running — version ${GN}${restored_version}${CL}"
     else
         msg_error "Traefik failed to start after rollback!"
-        echo -e "${TAB}  Run: ${YW}sudo systemctl status ${TRAEFIK_SERVICE}${CL}"
+        echo -e "${TAB}  Run: ${YW}systemctl status ${TRAEFIK_SERVICE}${CL}"
         exit 1
     fi
 
@@ -1083,7 +1242,7 @@ update_traefik() {
             msg_ok "Rollback successful — previous version restored"
         else
             msg_error "CRITICAL: Rollback failed! Manual intervention required"
-            echo -e "${TAB}  Run: ${YW}sudo systemctl status ${TRAEFIK_SERVICE}${CL}"
+            echo -e "${TAB}  Run: ${YW}systemctl status ${TRAEFIK_SERVICE}${CL}"
         fi
         return 1
     fi
@@ -1101,19 +1260,19 @@ update_manager() {
 
     # Ensure we're on main branch (not detached HEAD)
     local current_branch
-    current_branch=$(sudo -u "${TRAEFIK_MANAGER_USER}" git branch --show-current 2>/dev/null)
+    current_branch=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git branch --show-current 2>/dev/null)
     if [[ "$current_branch" != "main" ]]; then
         msg_warn "Not on main branch (${current_branch:-detached HEAD}), switching to main"
-        sudo -u "${TRAEFIK_MANAGER_USER}" git checkout main --quiet 2>/dev/null
+        runuser -u "${TRAEFIK_MANAGER_USER}" -- git checkout main --quiet 2>/dev/null
     fi
 
     # Fetch latest from remote
-    sudo -u "${TRAEFIK_MANAGER_USER}" git fetch origin main --tags --quiet 2>/dev/null
+    runuser -u "${TRAEFIK_MANAGER_USER}" -- git fetch origin main --tags --quiet 2>/dev/null
 
     # Compare local vs remote
     local local_hash remote_hash
-    local_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse HEAD)
-    remote_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse origin/main)
+    local_hash=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse HEAD)
+    remote_hash=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse origin/main)
 
     local current_version
     current_version=$(get_current_manager_version)
@@ -1125,7 +1284,7 @@ update_manager() {
 
     # Determine what we're updating to
     local remote_version
-    remote_version=$(sudo -u "${TRAEFIK_MANAGER_USER}" git describe --tags origin/main 2>/dev/null || echo "$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short origin/main)")
+    remote_version=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git describe --tags origin/main 2>/dev/null || echo "$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse --short origin/main)")
 
     echo ""
     echo -e "${TAB}${BL}Manager: ${RD}${current_version}${CL} → ${GN}${remote_version}${CL}"
@@ -1133,7 +1292,7 @@ update_manager() {
 
     # Pull latest on main branch
     msg_info "Pulling latest changes"
-    if ! sudo -u "${TRAEFIK_MANAGER_USER}" git pull origin main --quiet 2>/dev/null; then
+    if ! runuser -u "${TRAEFIK_MANAGER_USER}" -- git pull origin main --quiet 2>/dev/null; then
         msg_error "Failed to pull latest changes"
         echo -e "${TAB}  There may be local modifications. Check: ${YW}git status${CL}"
         return 1
@@ -1142,7 +1301,7 @@ update_manager() {
 
     # Update Python dependencies (always run per developer's update guide)
     msg_info "Updating Python dependencies"
-    sudo -u "${TRAEFIK_MANAGER_USER}" "${TRAEFIK_MANAGER_DIR}/venv/bin/pip" install -r requirements.txt gunicorn --quiet 2>/dev/null
+    runuser -u "${TRAEFIK_MANAGER_USER}" -- "${TRAEFIK_MANAGER_DIR}/venv/bin/pip" install -r requirements.txt gunicorn --quiet 2>/dev/null
     msg_ok "Python dependencies updated"
 
     # Rebuild vendor assets and Tailwind CSS
@@ -1165,7 +1324,7 @@ update_manager() {
         msg_ok "Traefik Manager running — ${GN}${new_version}${CL}"
     else
         msg_error "Traefik Manager failed to start!"
-        echo -e "${TAB}  Run: ${YW}sudo systemctl status ${TRAEFIK_MANAGER_SERVICE}${CL}"
+        echo -e "${TAB}  Run: ${YW}systemctl status ${TRAEFIK_MANAGER_SERVICE}${CL}"
         return 1
     fi
 }
@@ -1196,8 +1355,9 @@ i=0
 while [[ $i -lt ${#ARGS[@]} ]]; do
     case "${ARGS[$i]:-}" in
         --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
+        --setup) header_info; preflight_checks; guided_setup; exit 0 ;;
         --test-notify) test_gotify ;;
-        --schedule) manage_cron ;;
+        --schedule) manage_cron "${ARGS[$((i+1))]:-}" ;;
     esac
     i=$((i+1))
 done
@@ -1223,15 +1383,15 @@ MANAGER_REMOTE_VERSION=""
 if [[ -d "${TRAEFIK_MANAGER_DIR}/.git" ]]; then
     cd "${TRAEFIK_MANAGER_DIR}"
     # Ensure on main branch for accurate comparison
-    local_branch=$(sudo -u "${TRAEFIK_MANAGER_USER}" git branch --show-current 2>/dev/null)
+    local_branch=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git branch --show-current 2>/dev/null)
     if [[ "$local_branch" != "main" ]]; then
-        sudo -u "${TRAEFIK_MANAGER_USER}" git checkout main --quiet 2>/dev/null
+        runuser -u "${TRAEFIK_MANAGER_USER}" -- git checkout main --quiet 2>/dev/null
         CURRENT_MANAGER=$(get_current_manager_version)
     fi
-    sudo -u "${TRAEFIK_MANAGER_USER}" git fetch origin main --tags --quiet 2>/dev/null
-    local_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse HEAD 2>/dev/null)
-    remote_hash=$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse origin/main 2>/dev/null)
-    MANAGER_REMOTE_VERSION=$(sudo -u "${TRAEFIK_MANAGER_USER}" git describe --tags origin/main 2>/dev/null || echo "$(sudo -u "${TRAEFIK_MANAGER_USER}" git rev-parse --short origin/main)")
+    runuser -u "${TRAEFIK_MANAGER_USER}" -- git fetch origin main --tags --quiet 2>/dev/null
+    local_hash=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse HEAD 2>/dev/null)
+    remote_hash=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse origin/main 2>/dev/null)
+    MANAGER_REMOTE_VERSION=$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git describe --tags origin/main 2>/dev/null || echo "$(runuser -u "${TRAEFIK_MANAGER_USER}" -- git rev-parse --short origin/main)")
     if [[ "$local_hash" != "$remote_hash" ]]; then
         MANAGER_UP_TO_DATE=false
     fi
@@ -1312,6 +1472,14 @@ if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSE
     echo ""
 fi
 
+# First-run: auto-offer guided setup when nothing is configured yet.
+if [[ "$INTERACTIVE" == true ]] && is_first_run; then
+    echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
+    read -rp "  Run the guided setup now? [Y/n]: " _ans
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then guided_setup; fi
+    echo ""
+fi
+
 # Interactive menu
 if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}${BL}What would you like to do?${CL}"
@@ -1325,14 +1493,16 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}7)${CL} View changelog (release notes)"
     echo -e "${TAB}  ${GN}8)${CL} Test Gotify notification"
     echo -e "${TAB}  ${GN}9)${CL} Manage cron schedule"
+    echo -e "${TAB}  ${GN}10)${CL} Guided setup (reconfigure everything)"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-9/q]: " choice
+    read -rp "  Select an option [1-10/q]: " choice
 
     case "$choice" in
         1) ;;
         2) SKIP_MANAGER=true ;;
         3) SKIP_TRAEFIK=true ;;
+        10) guided_setup; exit 0 ;;
         4)
             read -rp "  Enter version (e.g. v3.7.0): " SPECIFIC_VERSION
             if [[ -z "$SPECIFIC_VERSION" ]]; then
