@@ -43,7 +43,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.3.3"
+SCRIPT_VERSION="1.3.4"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -1110,6 +1110,7 @@ rollback_traefik() {
 
     msg_info "Restoring backup"
     cp "${TRAEFIK_BIN}.bak" "${TRAEFIK_BIN}"
+    chown root:root "${TRAEFIK_BIN}"
     chmod +x "${TRAEFIK_BIN}"
     msg_ok "Restored ${TRAEFIK_BIN} from backup"
 
@@ -1227,9 +1228,12 @@ update_traefik() {
     systemctl stop "${TRAEFIK_SERVICE}.service"
     msg_ok "Stopped ${TRAEFIK_SERVICE}"
 
-    # Install
+    # Install. --no-same-owner so tar doesn't apply the archive's baked-in UID/GID
+    # (Traefik release tarballs carry a non-root build UID); then force root:root
+    # so a system binary a root service runs is never owned by an arbitrary user.
     msg_info "Installing new binary"
-    tar xzf "$tmp_file" -C "$(dirname "${TRAEFIK_BIN}")/" traefik
+    tar xzf "$tmp_file" -C "$(dirname "${TRAEFIK_BIN}")/" --no-same-owner traefik
+    chown root:root "${TRAEFIK_BIN}"
     chmod +x "${TRAEFIK_BIN}"
     rm -f "$tmp_file"
     msg_ok "Installed Traefik ${target_version}"
