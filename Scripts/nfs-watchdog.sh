@@ -9,14 +9,25 @@
 # cluster node.
 
 # ============================================================
-# CONFIGURATION — adjust these for your setup
+# CONFIGURATION
 # ============================================================
+# You can configure this script two ways:
+#   • Run the guided setup:  nfs-watchdog --setup   (recommended; seals secrets for you)
+#   • Or edit the values below directly (power users)
+# Either way works — the script detects whichever you've used.
+# (NFS mounts are auto-detected from /proc/mounts — nothing to configure there.)
+# ------------------------------------------------------------
+
+# --- Tunable: sane defaults, change only if your setup differs
 CHECK_TIMEOUT=5                       # Seconds before declaring a mount stale
-AUTO_REMOUNT=false                    # Auto-remount stale mounts (true/false)
+AUTO_REMOUNT=false                    # Auto-remount stale mounts (true/false); false = alert only
 LOG_FILE="/var/log/nfs-watchdog.log"  # Log file for cron mode
+
+# --- Optional: Gotify notifications (cron mode) --------------
+# Leave the token empty here and seal it instead:  nfs-watchdog --set-cred gotify-token
 GOTIFY_URL=""                         # Gotify server URL (e.g. http://10.10.3.6:80)
-GOTIFY_TOKEN=""                       # Gotify application token
-GOTIFY_PRIORITY=5                     # Gotify notification priority (1-10)
+GOTIFY_TOKEN=""                       # Gotify token (prefer --set-cred over plaintext here)
+GOTIFY_PRIORITY=5                     # Notification priority (1-10)
 # ============================================================
 
 set -euo pipefail
@@ -24,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -104,6 +115,14 @@ show_help() {
     echo -e "${TAB}${GN}--remount${CL}"
     echo -e "${TAB}${TAB}Force remount all NFS mounts (regardless of health)."
     echo ""
+    echo -e "${TAB}${GN}--setup${CL}"
+    echo -e "${TAB}${TAB}Guided setup wizard — walks detection timeout, stale-action,"
+    echo -e "${TAB}${TAB}Gotify notifications (sealing the token), and scheduling."
+    echo -e "${TAB}${TAB}Auto-offered on first run. Re-runnable."
+    echo ""
+    echo -e "${TAB}${GN}--set-cred <name>${CL}"
+    echo -e "${TAB}${TAB}Seal a secret (e.g. gotify-token) read from stdin via systemd-creds."
+    echo ""
     echo -e "${TAB}${GN}--test-notify${CL}"
     echo -e "${TAB}${TAB}Send a test notification to Gotify."
     echo ""
@@ -124,13 +143,17 @@ show_help() {
     # Dynamically show config variables with line numbers
     echo -e "${TAB}${BD}Variable                    Line  Current Value${CL}"
     echo -e "${TAB}──────────────────────────  ────  ─────────────────────────"
-    while IFS= read -r line; do
-        local linenum var val
+    local _cfgvars="CHECK_TIMEOUT AUTO_REMOUNT LOG_FILE GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY"
+    local cfgvar
+    for cfgvar in $_cfgvars; do
+        local line linenum val
+        line=$(grep -n "^${cfgvar}=" "$SCRIPT_PATH" | head -1)
+        [[ -z "$line" ]] && continue
         linenum=$(echo "$line" | cut -d: -f1)
-        var=$(echo "$line" | cut -d: -f2- | cut -d= -f1 | xargs)
-        val=$(echo "$line" | cut -d= -f2- | tr -d '"')
-        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$var" "$linenum" "$val"
-    done < <(grep -n '^[A-Z_]*=' "$SCRIPT_PATH" | grep -v '^#' | grep -v 'SCRIPT_\|^[0-9]*:set \|^[0-9]*:shopt \|^[0-9]*:RD=\|^[0-9]*:YW=\|^[0-9]*:GN=\|^[0-9]*:BL=\|^[0-9]*:BD=\|^[0-9]*:CL=\|^[0-9]*:BFR=\|^[0-9]*:CM=\|^[0-9]*:CROSS=\|^[0-9]*:INFO=\|^[0-9]*:TAB=\|INTERACTIVE\|DRY_RUN\|AUTO_YES\|DO_\|STALE_\|HEALTHY_\|MOUNT_' | head -6)
+        val=$(echo "$line" | cut -d= -f2- | sed 's/[[:space:]]*#.*$//' | tr -d '"' | xargs)
+        [[ -z "$val" ]] && val="(unset)"
+        printf "${TAB}${GN}%-28s${CL}${YW}%-6s${CL}%s\n" "$cfgvar" "$linenum" "$val"
+    done
 
     echo ""
     echo -e "${BD}FILES${CL}"
@@ -195,6 +218,130 @@ msg_warn() {
 get_nfs_mounts() {
     # Get all NFS mounts from /proc/mounts
     awk '$3 ~ /^nfs/ {print $1, $2, $3}' /proc/mounts 2>/dev/null
+}
+
+# ------------------------------------------------------------
+# Preflight — validate environment before doing anything else.
+# Runs FIRST in MAIN (before the install nudge / setup / menu),
+# matching the pve-config-backup / pi-hole-sync reference flow.
+# ------------------------------------------------------------
+preflight_checks() {
+    echo -e "${TAB}${BD}Preflight Checks${CL}"
+    local ok=true
+
+    # NFS client tooling must be present to test/remount mounts.
+    if command -v mount.nfs &>/dev/null || command -v mount.nfs4 &>/dev/null; then
+        msg_ok "NFS client tools found (mount.nfs)"
+    else
+        msg_error "mount.nfs not found — install nfs-common (Debian/Ubuntu) or nfs-utils (RHEL)"
+        ok=false
+    fi
+
+    # findmnt is used for mount inspection/remount; warn (not fatal) if missing.
+    if command -v findmnt &>/dev/null; then
+        msg_ok "findmnt available"
+    else
+        msg_warn "findmnt not found (part of util-linux) — some checks may be limited"
+    fi
+
+    # Detect NFS mounts. No mounts isn't fatal (they may appear later / on other
+    # nodes), but the user should know the watchdog has nothing to watch yet.
+    local mount_count
+    mount_count=$(get_nfs_mounts | grep -c . || true)
+    if [[ "$mount_count" -gt 0 ]]; then
+        msg_ok "Found ${mount_count} NFS mount(s) to monitor"
+    else
+        msg_warn "No NFS mounts found on this node yet — nothing to monitor until one is mounted"
+    fi
+
+    echo ""
+    if [[ "$ok" != true ]]; then
+        msg_error "Preflight failed — resolve the above and re-run."
+        echo ""
+        exit 1
+    fi
+    msg_ok "All preflight checks passed"
+    echo ""
+}
+
+# First run = no settings file yet. nfs-watchdog has no required-identity
+# config (mounts auto-detect), so the only signal is "has the user run setup".
+is_first_run() { [[ ! -f "$SETTINGS_FILE" ]]; }
+
+# ------------------------------------------------------------
+# Guided setup wizard — walks every setting needed for unattended
+# operation (the whole point of a watchdog: cron + alerts), seals the
+# Gotify token, persists answers, optionally schedules. Re-runnable.
+# ------------------------------------------------------------
+run_setup() {
+    header_info
+    echo -e "${TAB}${BD}Guided Setup${CL}"
+    echo -e "${TAB}Answer each prompt. Press Enter to keep the [current] value."
+    echo ""
+
+    # --- 1) Stale-detection behavior ---
+    echo -e "${TAB}${BD}1) Detection${CL}"
+    read -rp "  Seconds before a mount is declared stale [${CHECK_TIMEOUT}]: " _v
+    if [[ -n "$_v" ]]; then
+        if [[ "$_v" =~ ^[0-9]+$ ]] && [[ "$_v" -ge 1 ]]; then
+            CHECK_TIMEOUT="$_v"; settings_set CHECK_TIMEOUT "$_v"
+        else
+            msg_warn "Not a positive integer — keeping ${CHECK_TIMEOUT}"
+        fi
+    fi
+    echo ""
+
+    # --- 2) Action on stale ---
+    echo -e "${TAB}${BD}2) Action when a mount is stale${CL}"
+    echo -e "${TAB}  ${GN}1)${CL} Alert only (notify, make no changes)   ${YW}[safe default]${CL}"
+    echo -e "${TAB}  ${GN}2)${CL} Auto-remount (attempt to fix, then notify)"
+    local _cur_label="1 (alert only)"; [[ "$AUTO_REMOUNT" == "true" ]] && _cur_label="2 (auto-remount)"
+    read -rp "  Choose [current: ${_cur_label}]: " _v
+    case "$_v" in
+        1) AUTO_REMOUNT="false"; settings_set AUTO_REMOUNT "false" ;;
+        2) AUTO_REMOUNT="true";  settings_set AUTO_REMOUNT "true" ;;
+        "") : ;;  # keep current
+        *) msg_warn "Unrecognized choice — keeping ${_cur_label}" ;;
+    esac
+    echo ""
+
+    # --- 3) Gotify notifications (optional, token sealed) ---
+    echo -e "${TAB}${BD}3) Gotify notifications (optional)${CL}"
+    echo -e "${TAB}  ${INFO} An IP or hostname is fine (http is assumed). Only prefix ${BL}https://${CL} if your Gotify uses TLS."
+    read -rp "  Gotify server URL (blank to skip) [${GOTIFY_URL}]: " _v
+    if [[ -n "$_v" ]]; then
+        GOTIFY_URL="$_v"; settings_set GOTIFY_URL "$_v"
+        echo -e "${TAB}  ${INFO} The token is sealed (encrypted), never written in plaintext."
+        read -rsp "  Gotify application token: " _tok; echo ""
+        if [[ -n "$_tok" ]]; then
+            local m; m=$(printf '%s' "$_tok" | secret_set gotify-token)
+            msg_ok "Token sealed via ${m}"
+            require_dep curl curl "curl" || true
+        fi
+        read -rp "  Notification priority (1-10) [${GOTIFY_PRIORITY}]: " _v
+        [[ -n "$_v" ]] && { GOTIFY_PRIORITY="$_v"; settings_set GOTIFY_PRIORITY "$_v"; }
+    elif [[ -n "$GOTIFY_URL" ]]; then
+        : # keep existing
+    else
+        msg_info "Skipping notifications"
+    fi
+    echo ""
+
+    # --- 4) Schedule (optional, gated on install) ---
+    echo -e "${TAB}${BD}4) Schedule${CL}"
+    echo -e "${TAB}  A watchdog is most useful on a timer so it catches stale mounts unattended."
+    if installed_ok; then
+        read -rp "  Set up a cron schedule now? [Y/n]: " _v
+        [[ ! "$_v" =~ ^[Nn]$ ]] && manage_cron
+    else
+        msg_warn "Not installed to ${SCRIPT_INSTALL_DEST} yet — scheduling needs that first."
+        echo -e "${TAB}  Install via the first-run prompt (or rerun without --setup), then ${BL}--schedule${CL}."
+    fi
+    echo ""
+
+    msg_ok "Setup complete."
+    echo -e "${TAB}Settings saved to ${BL}${SETTINGS_FILE}${CL}"
+    echo ""
 }
 
 test_mount_readable() {
@@ -294,6 +441,8 @@ load_settings() {
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         key="${line%%=*}"; val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
         case "$key" in
+            CHECK_TIMEOUT) CHECK_TIMEOUT="$val" ;;
+            AUTO_REMOUNT) AUTO_REMOUNT="$val" ;;
             GOTIFY_URL) GOTIFY_URL="$val" ;;
             GOTIFY_PRIORITY) GOTIFY_PRIORITY="$val" ;;
             INSTALL_NUDGE_DISMISSED) INSTALL_NUDGE_DISMISSED="$val" ;;
@@ -844,6 +993,7 @@ i=0
 while [[ $i -lt ${#ARGS[@]} ]]; do
     case "${ARGS[$i]:-}" in
         --set-cred) do_set_cred "${ARGS[$((i+1))]:-}" ;;
+        --setup) header_info; preflight_checks; run_setup; exit 0 ;;
         --test-notify) test_gotify ;;
         --schedule) manage_cron ;;
     esac
@@ -864,7 +1014,12 @@ for arg in "${@:-}"; do
     esac
 done
 
+# Preflight — validate the environment before prompting for anything.
+preflight_checks
+
 # One-time install nudge (interactive only) so cron can run the canonical path.
+# Runs AFTER preflight — validate the environment before prompting to install
+# (matches the pve-config-backup / pi-hole-sync reference flow).
 if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSED" != "1" ]]; then
     echo -e "${TAB}${YW}Heads up: this script isn't installed at ${SCRIPT_INSTALL_DEST}.${CL}"
     echo -e "${TAB}Installing it there is what lets the cron / --schedule feature run unattended."
@@ -873,6 +1028,15 @@ if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSE
     if [[ ! "$_ans" =~ ^[Nn]$ ]]; then install_self || true
     else msg_warn "Skipped — scheduling stays disabled until installed. I won't ask again."
          settings_set INSTALL_NUDGE_DISMISSED "1"; INSTALL_NUDGE_DISMISSED="1"; fi
+    echo ""
+fi
+
+# First-run: auto-offer guided setup when nothing is configured yet. A watchdog
+# needs schedule + notifications to be useful, so we walk the user through it.
+if [[ "$INTERACTIVE" == true ]] && is_first_run; then
+    echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
+    read -rp "  Run the guided setup now? [Y/n]: " _ans
+    if [[ ! "$_ans" =~ ^[Nn]$ ]]; then run_setup; fi
     echo ""
 fi
 
@@ -886,9 +1050,10 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${TAB}  ${GN}4)${CL} Force remount all NFS mounts"
     echo -e "${TAB}  ${GN}5)${CL} Test Gotify notification"
     echo -e "${TAB}  ${GN}6)${CL} Manage cron schedule"
+    echo -e "${TAB}  ${GN}7)${CL} Guided setup (reconfigure everything)"
     echo -e "${TAB}  ${RD}q)${CL} Quit"
     echo ""
-    read -rp "  Select an option [1-6/q]: " choice
+    read -rp "  Select an option [1-7/q]: " choice
 
     case "$choice" in
         1) ;;
@@ -897,6 +1062,7 @@ if [[ "$INTERACTIVE" == true ]]; then
         4) DO_REMOUNT_ALL=true ;;
         5) test_gotify ;;
         6) manage_cron ;;
+        7) run_setup; exit 0 ;;
         q|Q)
             echo ""
             msg_ok "Exiting. No changes made."
