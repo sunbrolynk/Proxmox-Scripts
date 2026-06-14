@@ -43,7 +43,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="update-traefik"
-SCRIPT_VERSION="1.3.5"
+SCRIPT_VERSION="1.3.6"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -1362,6 +1362,22 @@ for arg in "${@:-}"; do
     esac
 done
 
+# Validate all flags up front — BEFORE any banner/preflight/interactive prompt —
+# so an unknown flag (e.g. a typo, or a renamed flag in an old cron entry) fails
+# fast with a non-zero exit instead of silently falling through to the
+# interactive run and hanging forever on a prompt no automated caller can answer.
+for arg in "${@:-}"; do
+    case "${arg:-}" in
+        --help|-h|--version|-V|--setup|--test-notify|--schedule|--set-cred|gotify-token) ;;
+        --traefik-only|--manager-only|--yes|-y|--check|--rollback|--changelog|--cron|--insecure-skip-checksum) ;;
+        v*) ;;
+        ""|-) ;;
+        -*) echo "${SCRIPT_NAME}: unknown option: ${arg}" >&2
+            echo "See ${SCRIPT_NAME} --help for valid options." >&2
+            exit 1 ;;
+    esac
+done
+
 header_info
 check_root
 
@@ -1452,14 +1468,6 @@ for arg in "${@:-}"; do
         --cron) CRON_MODE=true; INTERACTIVE=false ;;
         --insecure-skip-checksum) SKIP_CHECKSUM=true ;;
         v*) SPECIFIC_VERSION="$arg" ; INTERACTIVE=false ;;
-        # Flags consumed by the earlier early-exit / root-dispatch loops — valid,
-        # already handled (those loops exit), so accept silently here.
-        --help|-h|--version|-V|--setup|--test-notify|--schedule|--set-cred|gotify-token) ;;
-        ""|-) ;;  # empty arg (no-args invocation) or lone dash — ignore
-        # Anything else is an unknown flag. Fail loudly with a non-zero exit
-        # rather than silently dropping into interactive mode — a typo'd flag in
-        # a cron job must NOT hang forever waiting on a prompt no one will answer.
-        -*) header_info; msg_error "Unknown option: ${arg}"; echo -e "${TAB}  See ${BL}${SCRIPT_NAME} --help${CL} for valid options."; echo ""; exit 1 ;;
     esac
 done
 
