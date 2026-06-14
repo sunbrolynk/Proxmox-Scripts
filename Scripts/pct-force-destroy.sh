@@ -12,7 +12,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="pct-force-destroy"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 
 # Colors
@@ -82,6 +82,10 @@ show_help() {
     echo -e "${TAB}${GN}--dry-run${CL}"
     echo -e "${TAB}${TAB}Show what locks would be cleared without doing anything."
     echo -e "${TAB}${TAB}Can be used with a CTID or with --all."
+    echo ""
+    echo -e "${TAB}${GN}-y, --yes${CL}"
+    echo -e "${TAB}${TAB}Skip the destroy confirmation prompt (for automation/scripts)."
+    echo -e "${TAB}${TAB}Without it, an interactive destroy asks you to retype the CTID."
     echo ""
     echo -e "${TAB}${GN}--status${CL}"
     echo -e "${TAB}${TAB}Show all containers on this node with lock state and"
@@ -198,6 +202,23 @@ show_status() {
     exit 0
 }
 
+# Preflight — verify this is a Proxmox node with the tools we need, before we
+# touch any locks or containers. A clear early failure beats a confusing mid-run one.
+preflight_checks() {
+    local missing=false
+    if ! command -v pct &>/dev/null; then
+        msg_error "pct not found — this script must run on a Proxmox VE node."
+        missing=true
+    fi
+    if ! command -v pvesm &>/dev/null && ! command -v pvesh &>/dev/null; then
+        msg_warn "Proxmox storage tools (pvesm/pvesh) not found — lock clearing may be incomplete."
+    fi
+    if [[ "$missing" == true ]]; then
+        echo -e "${TAB}  This tool clears Proxmox container locks; it only works on a PVE host."
+        exit 1
+    fi
+}
+
 # Early exit for help and version
 case "${1:-}" in
     -h|--help) show_help ;;
@@ -215,9 +236,19 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Preflight — confirm we're on a Proxmox node with the tools we need, before
+# touching any locks. A clear early failure beats a confusing mid-run error.
+if ! command -v pct &>/dev/null; then
+    header_info
+    msg_error "pct not found — this script must run on a Proxmox VE node"
+    echo -e "${TAB}  (pct is the Proxmox container CLI; it isn't present here.)"
+    exit 1
+fi
+
 # Parse arguments
 DRY_RUN=false
 CLEAR_ALL=false
+AUTO_YES=false
 CTID=""
 
 for arg in "$@"; do
@@ -225,13 +256,15 @@ for arg in "$@"; do
         --dry-run) DRY_RUN=true ;;
         --all) CLEAR_ALL=true ;;
         --status) show_status ;;
+        --yes|-y) AUTO_YES=true ;;
         -h|--help|-V|--version) ;; # already handled
         *)
             if [[ "$arg" =~ ^[0-9]+$ ]]; then
                 CTID="$arg"
             else
-                msg_error "Invalid argument: ${arg}"
-                echo -e "${TAB}  Help: ${BL}${SCRIPT_NAME} -h${CL}"
+                msg_error "Unknown argument: ${arg}"
+                echo -e "${TAB}  Expected a numeric container ID or a valid flag."
+                echo -e "${TAB}  See ${BL}${SCRIPT_NAME} --help${CL} for valid options."
                 exit 1
             fi
             ;;
@@ -401,12 +434,28 @@ if [[ $LOCKS_CLEARED -eq 0 ]]; then
 fi
 
 # Destroy (skip in dry-run)
+# Destroy (skip in dry-run)
 if [[ "$DRY_RUN" == true ]]; then
     echo ""
     msg_warn "Would run: pct destroy ${CTID} --purge --force"
     echo ""
     msg_ok "Dry run complete. No changes made."
 else
+    # Final confirmation before the irreversible destroy. --yes bypasses it for
+    # automation (e.g. clearing a wedged container from a script). Dry-run never
+    # reaches here. This is the last stop before purge — make it deliberate.
+    if [[ "$AUTO_YES" != true ]]; then
+        echo ""
+        echo -e "${TAB}${YW}About to permanently destroy CT ${CTID} (pct destroy --purge --force).${CL}"
+        echo -e "${TAB}${YW}This is irreversible — the container and its disks are removed.${CL}"
+        read -rp "  Type the container ID (${CTID}) to confirm: " _confirm
+        if [[ "$_confirm" != "$CTID" ]]; then
+            echo ""
+            msg_warn "Confirmation did not match. Container was NOT destroyed."
+            echo ""
+            exit 0
+        fi
+    fi
     msg_info "Destroying container ${CTID}"
     if pct destroy "$CTID" --purge --force 2>&1; then
         msg_done "Container ${CTID} destroyed successfully"
