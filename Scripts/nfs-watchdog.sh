@@ -35,7 +35,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="nfs-watchdog"
-SCRIPT_VERSION="1.3.4"
+SCRIPT_VERSION="1.3.5"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"
@@ -1086,6 +1086,19 @@ for arg in "${@:-}"; do
             exit 0
             ;;
         --status) show_status ;;
+    esac
+done
+
+# Reject unknown flags before any banner/interactive prompt, so a typo'd flag in
+# a cron entry fails fast (exit 1) instead of silently running the default action.
+for arg in "${@:-}"; do
+    case "${arg:-}" in
+        --help|-h|--version|-V|--setup|--test-notify|--schedule|--set-cred|--status) ;;
+        --dry-run|--remount|--yes|-y|--cron|-l) ;;
+        ""|-) ;;
+        -*) echo "${SCRIPT_NAME}: unknown option: ${arg}" >&2
+            echo "See ${SCRIPT_NAME} --help for valid options." >&2
+            exit 1 ;;
     esac
 done
 

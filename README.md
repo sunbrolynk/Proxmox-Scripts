@@ -54,22 +54,18 @@ Styled after the [Proxmox VE Community Scripts](https://github.com/community-scr
 Interactive update script for [Traefik](https://traefik.io/) reverse proxy and [Traefik Manager](https://github.com/chr0nzz/traefik-manager) web UI.
 
 **Features:**
-- Auto-detects latest Traefik release from GitHub
-- Updates to latest or a specific version
+- Auto-detects latest Traefik release from GitHub; updates to latest or a specific version
 - SHA256 checksum verification on every download — **fail-closed**: a checksum mismatch always aborts, and a *missing* checksum aborts too (in cron) or prompts (interactively) rather than silently installing unverified. Override only with the explicit `--insecure-skip-checksum` flag
-- ARM64 and armv7 architecture auto-detection
-- Automatic backup of current binary before updating
-- Automatic rollback if the new version fails to start
-- Updates Traefik Manager via git pull and runs `setup-assets.sh` for vendor/CSS rebuild
-- View GitHub release notes / changelog for any version
-- Environment checks (OS, kernel, architecture, platform, Python, disk space, memory)
-- Preflight dependency checks with interactive install of missing packages
-- Detects and offers to start stopped services
-- Built-in cron scheduler with Gotify notifications for automated updates
-- **Sealed Gotify credentials** — the notification token is sealed with `systemd-creds` (or a `chmod 600` fallback) and sent in a request header, never in the URL; seal it with `--set-cred gotify-token`
-- Scheduling is gated on being installed at `/usr/local/bin` (cron runs that exact path), and the cron write is verified rather than assumed
-- CTRL+C safe — cleans up temp files and exits gracefully
-- Shows dashboard URLs on completion
+- **Installed binary is forced to `root:root`** — the release tarball carries a non-root build UID, so the script extracts with `--no-same-owner` and `chown`s root, never leaving a root-run binary owned by an arbitrary user
+- ARM64 and armv7 architecture auto-detection; automatic backup + rollback if the new version fails
+- Updates Traefik Manager via git. **Read-only status never mutates the repo** — a pinned Manager version stays put when you just check status; only an actual update (with consent) switches what's checked out
+- Uses `runuser` (not `sudo`) to run Manager git/pip operations, so it works on a stock Proxmox host where `sudo` isn't installed
+- **Guided setup** (`--setup`) — walks every knob (Traefik & Manager paths/services/ports/arch, thresholds, Gotify, scheduling), seals the token, persists answers; auto-offered on first run
+- Environment + preflight checks; detects and offers to start stopped services
+- **Sealed Gotify credentials** — token sealed with `systemd-creds` (or `chmod 600` fallback), sent in a request header, never in the URL; seal it with `--set-cred gotify-token`
+- Built-in cron scheduler — interactive or one-shot `--schedule "<expr>"`; gated on canonical-path install, cron write verified
+- **Unknown flags are rejected** with a clear error and non-zero exit (a typo'd flag in cron fails fast instead of hanging on a prompt)
+- CTRL+C safe; shows dashboard URLs on completion
 
 **Install:**
 
@@ -81,7 +77,8 @@ chmod +x /usr/local/bin/update-traefik
 **Usage:**
 
 ```bash
-sudo update-traefik                     # Interactive mode — 9-option guided menu
+sudo update-traefik                     # Interactive mode — 10-option guided menu
+sudo update-traefik --setup             # Guided setup wizard (auto-offered on first run)
 sudo update-traefik -y                  # Update everything without prompts
 sudo update-traefik --cron              # Automated update with Gotify notification
 sudo update-traefik v3.7.0              # Update Traefik to a specific version
@@ -94,7 +91,8 @@ sudo update-traefik --changelog         # Show release notes for latest version
 sudo update-traefik --changelog v3.7.0  # Show release notes for specific version
 sudo update-traefik --test-notify       # Test Gotify notification
 sudo update-traefik --set-cred gotify-token  # Seal the Gotify token (reads value from stdin)
-sudo update-traefik --schedule          # Set up, change, or remove cron schedule
+sudo update-traefik --schedule          # Interactive cron schedule manager
+sudo update-traefik --schedule "0 4 * * 0"   # Set schedule non-interactively
 sudo update-traefik -h                  # Full man-style help with config line numbers
 sudo update-traefik -V                  # Show version
 ```

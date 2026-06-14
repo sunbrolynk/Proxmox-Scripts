@@ -46,7 +46,7 @@ shopt -s inherit_errexit nullglob
 
 # Script metadata
 SCRIPT_NAME="<script-name>"
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.3.0"
 SCRIPT_URL="https://github.com/SunBroLynk/Proxmox-Scripts"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_INSTALL_DEST="/usr/local/bin/${SCRIPT_NAME}"   # canonical path cron runs
@@ -570,6 +570,22 @@ for arg in "${ARGS[@]}"; do
     esac
 done
 
+# Reject unknown flags BEFORE any banner/preflight/interactive prompt, so a typo'd
+# flag (or a renamed flag in an old cron entry) fails fast with exit 1 instead of
+# silently dropping into the interactive run and hanging on a prompt no automated
+# caller can answer. IMPORTANT: when you add a new flag anywhere below, also add it
+# to this whitelist, or it will be wrongly rejected.
+for arg in "${ARGS[@]}"; do
+    case "${arg:-}" in
+        --help|-h|--version|-V|--setup|--test-notify|--schedule|--set-cred) ;;
+        --yes|-y|--cron) ;;
+        ""|-) ;;
+        -*) echo "${SCRIPT_NAME}: unknown option: ${arg}" >&2
+            echo "See ${SCRIPT_NAME} --help for valid options." >&2
+            exit 1 ;;
+    esac
+done
+
 # Root check (remove if the script doesn't need root)
 if [[ $EUID -ne 0 ]]; then
     header_info; msg_error "This script must be run as root (use sudo)"; exit 1
@@ -601,6 +617,13 @@ done
 # Preflight — validate the environment FIRST, before prompting for anything.
 preflight_checks
 
+# Capture first-run status BEFORE the nudge can write a settings file. The nudge's
+# "skip" path calls settings_set, which creates the file — and a later is_first_run
+# check (= "no settings file") would then wrongly return false, silently suppressing
+# the guided-setup offer for anyone who declined the install nudge. Capture up front.
+WAS_FIRST_RUN=false
+if is_first_run; then WAS_FIRST_RUN=true; fi
+
 # One-time install nudge (interactive only) — offer the canonical path so cron works.
 # Runs AFTER preflight (matches the reference flow; never nudge before validating).
 if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSED" != "1" ]]; then
@@ -615,7 +638,9 @@ if [[ "$INTERACTIVE" == true ]] && ! installed_ok && [[ "$INSTALL_NUDGE_DISMISSE
 fi
 
 # First-run: auto-offer the guided setup when nothing is configured yet.
-if [[ "$INTERACTIVE" == true ]] && is_first_run; then
+# Gate on the value captured BEFORE the nudge (see WAS_FIRST_RUN above) so declining
+# the install nudge doesn't suppress this offer.
+if [[ "$INTERACTIVE" == true ]] && [[ "$WAS_FIRST_RUN" == true ]]; then
     echo -e "${TAB}${YW}Looks like a fresh setup — nothing is configured yet.${CL}"
     read -rp "  Run the guided setup now? [Y/n]: " _ans
     if [[ ! "$_ans" =~ ^[Nn]$ ]]; then guided_setup; fi

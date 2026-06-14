@@ -170,8 +170,8 @@ install-gated scheduling) into the template and the other cron-worthy scripts.
       at v1.1.0 (URL-token leak, hardened cron, sealing); guided wizard added; 8 findings fixed during
       hardware test; targeted-restore feature added. See `TESTING-pi-hole-sync.md` for the full record.
 - [x] **nfs-watchdog.sh → v1.3.3** — HARDWARE-VALIDATED. Wizard + preflight + 3-state detection (healthy/stale/server-down) + SAFE remount (never destroys a mount it can't restore) + non-interactive --schedule. 7 findings fixed. See TESTING-nfs-watchdog.md.
-- [x] **update-traefik.sh → v1.2.0** — converged + fail-closed checksum. NOT yet hardware-tested.
-- [ ] **Hardware-validate update-traefik** on the sandbox (pi-hole-sync DONE ✅, nfs-watchdog DONE ✅).
+- [x] **update-traefik.sh → v1.3.6** — HARDWARE-VALIDATED. Full wizard + runuser (no sudo) + read-only status + root-owned binary + schedule-consent + unknown-flag reject. 6 findings fixed. Core update 3.6.0→3.7.5 + rollback + checksum all validated. See TESTING-update-traefik.md.
+- [x] **Hardware-validate update-traefik** on the sandbox — DONE ✅ (all four scripts now hardware-validated).
       update-traefik needs its own env (Traefik
       systemd service + checksum-URL-block test).
 - [ ] After validation: update README per-script sections for the new flags/behavior
@@ -186,7 +186,7 @@ config block is fallback default. Build one script at a time, hardware-tested ea
 - [x] **pi-hole-sync** — `--setup` wizard built + HARDWARE-VALIDATED (v1.3.1). Persistence round-trip,
       sealed token, multi-target SSH check all confirmed on real hardware.
 - [x] **nfs-watchdog** — `--setup` wizard built + HARDWARE-VALIDATED (v1.3.3): CHECK_TIMEOUT, AUTO_REMOUNT, Gotify, schedule. Persistence + sealing confirmed.
-- [ ] **update-traefik** — `--setup` wizard: the TRAEFIK_* paths/service/port settings, Gotify, schedule
+- [x] **update-traefik** — `--setup` wizard built + HARDWARE-VALIDATED (v1.3.6): all TRAEFIK_* paths/services/ports, thresholds, Gotify, schedule. Persistence + sealing confirmed.
 - [ ] Each: config-block vars become fallback defaults overridden by the settings file; hardware-test
       the persistence (set via wizard → re-run → values remembered) + sealing + scheduling
 - [ ] Promote a reusable `run_setup` skeleton into script-template.sh once the pattern is proven across all three

@@ -195,11 +195,11 @@ Not every script needs these, but when a script must store a replayable secret, 
 
 | Script | Purpose | Status |
 |--------|---------|--------|
-| update-traefik.sh | Update Traefik binary and Traefik Manager | Active — v1.2.0 (sealed Gotify, hardened cron, fail-closed checksum) |
+| update-traefik.sh | Update Traefik binary and Traefik Manager | Active — v1.3.6 (HARDWARE-VALIDATED: wizard, runuser, root-owned binary, read-only status, unknown-flag reject) |
 | pct-force-destroy.sh | Force destroy LXCs with stale NFS locks | Active |
-| pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active — v1.3.1 (HARDWARE-VALIDATED: wizard, sync, targeted restore, diff) |
-| nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active — v1.3.3 (HARDWARE-VALIDATED: wizard, 3-state detection, safe remount) |
-| pve-config-backup.sh | Back up Proxmox VE host config (the gap PBS/vzdump leave); guided restore wizard + scriptable restore CLI | Active — **v1.3.4**, hardware-validated |
+| pihole-sync.sh | Sync Pi-hole config from primary to backup(s) | Active — v1.3.4 (HARDWARE-VALIDATED: wizard, sync, targeted restore, diff, unknown-flag reject) |
+| nfs-watchdog.sh | Monitor NFS mount health across cluster nodes | Active — v1.3.5 (HARDWARE-VALIDATED: wizard, 3-state detection, safe remount, unknown-flag reject) |
+| pve-config-backup.sh | Back up Proxmox VE host config (the gap PBS/vzdump leave); guided restore wizard + scriptable restore CLI | Active — **v1.3.7**, hardware-validated |
 
 ## Architecture Notes
 

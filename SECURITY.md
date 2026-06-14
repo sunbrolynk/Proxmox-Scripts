@@ -146,6 +146,17 @@ Full hardware validation on a 3-Pi-hole sandbox. Most findings were UX/correctne
 
 > Safety lesson: a self-healing tool must never make things *worse* on failure than the problem it's fixing. "Unmount then try to remount" is unsafe when the remount can fail — always confirm you can restore before you tear down. And the most dangerous failures are the *silent* ones: destroying the mount then reporting "healthy" hid the outage entirely. Test the real failure mode (down the actual server) — that's what surfaced both issues; reading the code did not.
 
+### update-traefik hardware test (2026-06-13, v1.3.6) — security-relevant findings
+
+| Date | Script / Version | Finding | Resolution |
+|------|------------------|---------|------------|
+| 2026-06-13 | update-traefik → 1.3.1 | **A read-only status check silently mutated the manager git repo** (`git checkout main`), force-moving a pinned version to the tip of main just by viewing status — an unconsented "update" triggered by an observation. | Compare against `origin/main` without switching the working tree; confine branch changes to the actual update path, with consent. |
+| 2026-06-13 | update-traefik → 1.3.4 | **The updated Traefik binary was owned by the release tarball's build UID (1001), not root.** `tar x` as root preserves archive ownership and the install only `chmod +x`'d. On a host where 1001 is a real user, that user could replace the binary a root service executes — a local-privilege / supply-chain exposure. The script reported success the whole time. | Extract with `tar --no-same-owner` and `chown root:root` after, in both update and rollback. |
+| 2026-06-13 | update-traefik → 1.3.6 | **Unknown flags fell through to interactive mode and hung automation.** A typo'd or renamed flag in a cron entry was silently ignored; the script entered the interactive run and blocked forever on a prompt with no one to answer — a denial-of-update that fails *open* (job wedged) rather than closed. | Reject unknown flags before any output with a non-zero exit. Propagated repo-wide (all scripts + template lacked it). |
+| 2026-06-13 | update-traefik → 1.3.0 | **Assumed `sudo` exists** for running git/pip as the manager user — but Proxmox runs as root and frequently has no sudo, so every privileged-as-another-user operation silently failed. | Use `runuser` (util-linux, always present) instead of `sudo -u`. |
+
+> Lessons reinforced: (1) an *observation* path must never change state — this is the second script where a "detection" routine was found mutating things. (2) A green "✓ success" line is not proof of a correct result; verify the artifact on disk (ownership, contents), not the script's self-report. (3) Checksum verification must stay fail-closed: a mismatch is always fatal, a missing checksum aborts unless explicitly overridden — and the honest threat model (transit tampering, not a compromised upstream) belongs in the code.
+
 ## Best Practices for Contributors
 
 1. **Keep it simple** — fewer lines of code means fewer places for bugs
